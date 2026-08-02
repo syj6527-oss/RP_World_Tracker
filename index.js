@@ -189,7 +189,8 @@ const isStandaloneInternalLabel = name =>
 
 async function commitDetectedPlace(candidate) {
     if (!candidate || !lm?.currentChatId) return null;
-    if (candidate.chatKey && candidate.chatKey !== lm.currentChatId) return null;
+    const activeChatKey = String(lm?.getChatId?.() || lm.currentChatId || '');
+    if (candidate.chatKey && candidate.chatKey !== activeChatKey) return null;
     const source = ['character', 'schedule'].includes(candidate.source) ? candidate.source : 'detected';
 
     // Final guard: a bare indoor label must never become a world-map place.
@@ -896,7 +897,7 @@ async function init() {
         const newId = lm.getChatId();
         dbg(`🔄 CHAT_CHANGED → ${newId}`);
         await lm.loadChat();
-        detectionCandidates.clear();
+        detectionCandidates.activateChat();
         await _ensureTempPinned(); // 좌표 없는 임시/예정 장소 핀 보정
         pi.inject();
         ui.resetMap();

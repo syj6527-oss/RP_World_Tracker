@@ -138,9 +138,24 @@ export function suspiciousLocationReason(location = {}) {
 export class DetectionCandidateManager {
     constructor(locationManager) {
         this.lm = locationManager;
-        this._items = [];
+        this._itemsByChat = new Map();
         this._seq = 0;
         this.onChange = null;
+    }
+
+    _getChatKey() {
+        try {
+            return String(this.lm?.getChatId?.() || this.lm?.currentChatId || '');
+        } catch (_) {
+            return String(this.lm?.currentChatId || '');
+        }
+    }
+
+    _getItems(create = false) {
+        const chatKey = this._getChatKey();
+        if (!chatKey) return [];
+        if (create && !this._itemsByChat.has(chatKey)) this._itemsByChat.set(chatKey, []);
+        return this._itemsByChat.get(chatKey) || [];
     }
 
     _emit() {
@@ -148,13 +163,21 @@ export class DetectionCandidateManager {
     }
 
     list() {
-        return this._items.map(item => ({ ...item }));
+        return this._getItems().map(item => ({ ...item }));
     }
 
-    count() { return this._items.length; }
+    count() { return this._getItems().length; }
+
+    activateChat() { this._emit(); }
 
     clear() {
-        this._items = [];
+        const chatKey = this._getChatKey();
+        if (chatKey) this._itemsByChat.delete(chatKey);
+        this._emit();
+    }
+
+    clearAll() {
+        this._itemsByChat.clear();
         this._emit();
     }
 
@@ -165,7 +188,8 @@ export class DetectionCandidateManager {
             return { queued: false, ignored: true, reason: '사용자가 계속 무시하도록 설정' };
         }
 
-        const chatKey = String(this.lm?.currentChatId || '');
+        const chatKey = this._getChatKey();
+        const items = this._getItems(true);
         const requestedParentId = String(assessment.parentId || options.parentId || '').replace(/[^A-Za-z0-9_.:-]/g, '').slice(0, 160);
         const validParent = assessment.kind === 'sub'
             ? this.lm?.locations?.find(location => location.id === requestedParentId && !location.parentId &&
@@ -175,13 +199,13 @@ export class DetectionCandidateManager {
         const parentId = validParent?.id || '';
         const baseDedupeKey = `${chatKey}|${assessment.key}|${assessment.kind}`;
         const dedupeKey = assessment.kind === 'sub' && parentId ? `${baseDedupeKey}|${parentId}` : baseDedupeKey;
-        let existing = this._items.find(item => item.dedupeKey === dedupeKey);
+        let existing = items.find(item => item.dedupeKey === dedupeKey);
         let parentContextUpdated = false;
         // A parentless Room held for review may become actionable when a real
         // current parent appears. Upgrade that same card instead of losing it or
         // creating a second copy. Different real parents keep separate cards.
         if (!existing && assessment.kind === 'sub' && parentId) {
-            existing = this._items.find(item => item.dedupeKey === baseDedupeKey && !item.parentId);
+            existing = items.find(item => item.dedupeKey === baseDedupeKey && !item.parentId);
             if (existing) {
                 existing.parentId = parentId;
                 existing.dedupeKey = dedupeKey;
@@ -218,20 +242,24 @@ export class DetectionCandidateManager {
             createdAt: Date.now(),
             lastSeenAt: Date.now(),
         };
-        this._items.push(candidate);
-        if (this._items.length > 30) this._items.splice(0, this._items.length - 30);
+        items.push(candidate);
+        if (items.length > 30) items.splice(0, items.length - 30);
         this._emit();
         return { queued: true, candidate: { ...candidate } };
     }
 
     dismiss(id) {
-        const before = this._items.length;
-        this._items = this._items.filter(item => item.id !== id);
-        if (before !== this._items.length) this._emit();
+        const chatKey = this._getChatKey();
+        const items = this._getItems();
+        const nextItems = items.filter(item => item.id !== id);
+        if (nextItems.length !== items.length) {
+            this._itemsByChat.set(chatKey, nextItems);
+            this._emit();
+        }
     }
 
     async ignore(id) {
-        const item = this._items.find(candidate => candidate.id === id);
+        const item = this._getItems().find(candidate => candidate.id === id);
         if (!item) return false;
         await this.lm?.ignoreDetectedName?.(item.name);
         this.dismiss(id);

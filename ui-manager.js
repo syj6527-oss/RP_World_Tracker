@@ -4933,7 +4933,7 @@ ${trimmed.substring(0, 1500)}`;
         await this.lm.db.deleteAll();
         this.lm.locations = []; this.lm.movements = []; this.lm.distances = []; this.lm.ignoredDetectedNames = [];
         this.lm.currentLocationId = null; this.lm.currentSubLocationId = null;
-        this.detectionCandidates?.clear?.();
+        this.detectionCandidates?.clearAll?.();
         this.refresh();
         toastSuccess('🗑️ 전체 데이터 삭제 완료!');
     }
