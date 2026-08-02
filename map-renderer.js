@@ -11,16 +11,16 @@ export class MapRenderer {
         this._cityBgEl = null;       // Hub별 배경 캐시
         this._cityHubKey = null;     // 현재 생성된 Hub 식별자
         this._regenCounter = 0;       // 재생성 카운터 (매번 다른 맵)
+        this._pinPositions = new Map();
         this._init();
     }
     _srand(s){return()=>{s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};}
     _hashStr(s){let h=0;for(let i=0;i<s.length;i++){h=((h<<5)-h+s.charCodeAt(i))|0;}return Math.abs(h);}
 
-    // ★ localStorage 핀 좌표 저장/로드
-    _pinKey(locId) { return `wt_pin_${this.lm.currentChatId||'x'}_${locId}`; }
-    _savePinPos(locId, x, y) { try { localStorage.setItem(this._pinKey(locId), JSON.stringify({x,y})); } catch(_){} }
-    _loadPinPos(locId) { try { const v = localStorage.getItem(this._pinKey(locId)); return v ? JSON.parse(v) : null; } catch(_){ return null; } }
-    _clearPinPos(locId) { try { localStorage.removeItem(this._pinKey(locId)); } catch(_){} }
+    // 핀 좌표는 Location DB에도 저장되며, 보조 캐시는 현재 세션 메모리에만 둔다.
+    _savePinPos(locId, x, y) { this._pinPositions.set(String(locId), { x, y }); }
+    _loadPinPos(locId) { return this._pinPositions.get(String(locId)) || null; }
+    _clearPinPos(locId) { this._pinPositions.delete(String(locId)); }
 
     _init() {
         if (!this.container) return;
@@ -93,7 +93,7 @@ export class MapRenderer {
 
         // Hub 핀 분류 (level ≤ 6 = 같은 동네, B4: 필터 강화)
         const curLoc = locations.find(l => l.id === currentLocationId) || locations[0];
-        const dists = this.lm.distances || [];
+        const dists = (this.lm.distances || []).filter(distance => distance._manual === true);
         const hubPins = curLoc ? locations.filter(l => {
             if (l.parentId) return false; // ★ 서브 장소는 약도에서 숨김
             if (l.id === curLoc.id) return true;
@@ -108,13 +108,13 @@ export class MapRenderer {
             return lvl <= 6;
         }) : locations;
 
-        // ★ localStorage 저장 좌표 최우선 적용 (레이아웃보다 먼저!)
+        // 현재 세션에서 이동한 핀 좌표 우선 적용
         for (const loc of hubPins) {
             const saved = this._loadPinPos(loc.id);
             if (saved) { loc.x = saved.x; loc.y = saved.y; loc._manualXY = true; }
         }
 
-        // 레이아웃 (localStorage에 없는 핀만 자동 배치)
+        // 레이아웃 (수동 좌표가 없는 핀만 자동 배치)
         if (hubPins.length >= 2) this._autoLayout(hubPins, curLoc);
         if (curLoc && curLoc.x === 0 && curLoc.y === 0) {
             curLoc.x = 300; curLoc.y = 280;
@@ -354,31 +354,12 @@ export class MapRenderer {
     }
 
     // ================================================================
-    //  거리 점선 + pill (Hub 핀만)
+    //  실제 이동 간선만 표시. 거리 all-pairs는 약도에 그리지 않는다.
     // ================================================================
     _drawDistLines(hubPins, movements) {
         const hubIds = new Set(hubPins.map(l => l.id));
         const drawn = new Set();
 
-        for (const d of (this.lm.distances || [])) {
-            if (!hubIds.has(d.fromId) || !hubIds.has(d.toId)) continue;
-            const f = hubPins.find(l => l.id === d.fromId), t = hubPins.find(l => l.id === d.toId);
-            if (!f || !t) continue;
-            const k = [d.fromId, d.toId].sort().join('-');
-            if (drawn.has(k)) continue; drawn.add(k);
-            const lvl = d.level || 5;
-            this.svg.appendChild(this._el('line', { x1: f.x, y1: f.y, x2: t.x, y2: t.y, stroke: '#A09888', 'stroke-width': 2, 'stroke-dasharray': '6 4', 'stroke-linecap': 'round', opacity: 0.45 }));
-            if (d.distanceText || d.level) {
-                const mx = (f.x + t.x) / 2, my = (f.y + t.y) / 2;
-                const labels = {1:'바로 옆',2:'매우 가까움',3:'가까움',4:'도보 5분',5:'도보권',6:'도보 15분'};
-                const txt = d.distanceText || labels[d.level] || `Lv.${d.level}`;
-                const tl = txt.length * 5.5 + 12;
-                const pill = this._el('g', { transform: `translate(${mx},${my - 8})` });
-                pill.appendChild(this._el('rect', { x: -tl / 2, y: -7, width: tl, height: 14, rx: 7, fill: '#fff', stroke: '#E8E4D8', 'stroke-width': 0.6, filter: 'url(#wt-sh)' }));
-                pill.appendChild(this._el('text', { x: 0, y: 3, 'text-anchor': 'middle', fill: '#5E84E2', 'font-size': '7.5', 'font-weight': '600' }, txt));
-                this.svg.appendChild(pill);
-            }
-        }
         for (const m of movements) {
             if (!hubIds.has(m.fromId) || !hubIds.has(m.toId)) continue;
             const f = hubPins.find(l => l.id === m.fromId), t = hubPins.find(l => l.id === m.toId);
@@ -455,7 +436,7 @@ export class MapRenderer {
         // 가까운 장소
         let nearName = '';
         let nearLevel = 99;
-        for (const d of (this.lm.distances || [])) {
+        for (const d of (this.lm.distances || []).filter(distance => distance._manual === true)) {
             const otherId = d.fromId === locId ? d.toId : d.toId === locId ? d.fromId : null;
             if (!otherId) continue;
             if ((d.level || 5) < nearLevel) {
@@ -576,7 +557,7 @@ export class MapRenderer {
             if (loc._manualXY) manualBackup.set(loc.id, { x: loc.x, y: loc.y });
         }
 
-        const dists = this.lm.distances || [];
+        const dists = (this.lm.distances || []).filter(distance => distance._manual === true);
         const geoLocs = hubPins.filter(l => l.lat != null && l.lng != null);
 
         if (geoLocs.length >= 2) {
@@ -629,7 +610,7 @@ export class MapRenderer {
                 const { mx, my } = toM(loc.lat, loc.lng);
                 loc.x = Math.round(cx + mx * scale); loc.y = Math.round(cy + my * scale);
             } else {
-                const dist = (this.lm.distances || []).find(d => (d.fromId === curLoc.id && d.toId === loc.id) || (d.toId === curLoc.id && d.fromId === loc.id));
+                const dist = (this.lm.distances || []).find(d => d._manual === true && ((d.fromId === curLoc.id && d.toId === loc.id) || (d.toId === curLoc.id && d.fromId === loc.id)));
                 const level = dist?.level || 5;
                 const px = level * 28 + 40;
                 const angle = ((loc.id.charCodeAt(4) || 0) * 37 + 11) % 360 * Math.PI / 180;
@@ -659,7 +640,7 @@ export class MapRenderer {
     // ================================================================
     //  🏰 FANTASY (기존 유지)
     // ================================================================
-    _renderFantasy() { const{locations,movements,currentLocationId}=this.lm;if(locations.length>=2)this._autoLayout(locations,locations.find(l=>l.id===currentLocationId)||locations[0]);const cW=Math.max(this.container?.offsetWidth||600,300),cH=Math.max(this.container?.offsetHeight||400,300),aspect=cW/cH;if(locations.length){const pad=100,xs=locations.map(l=>l.x),ys=locations.map(l=>l.y),minX=Math.min(...xs)-pad,maxX=Math.max(...xs)+pad,minY=Math.min(...ys)-pad,maxY=Math.max(...ys)+pad,w=Math.max(400,maxX-minX),h=Math.max(300,maxY-minY,w/aspect);this.vb={x:minX,y:minY,w,h};}else{this.vb={x:0,y:0,w:600,h:Math.max(400,Math.round(600/aspect))};}this._applyVB();const vb=this.vb;let svg=`<defs><filter id="wt-glow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>`;const drawn=new Set();for(const d of(this.lm.distances||[])){const f=locations.find(l=>l.id===d.fromId),t=locations.find(l=>l.id===d.toId);if(!f||!t)continue;const k=[d.fromId,d.toId].sort().join('-');if(drawn.has(k))continue;drawn.add(k);const mx=(f.x+t.x)/2+((k.charCodeAt(0)%20)-10),my=(f.y+t.y)/2+((k.charCodeAt(1%k.length)%20)-10);svg+=`<path d="M${f.x},${f.y} Q${mx},${my} ${t.x},${t.y}" fill="none" stroke="#6B3A2A" stroke-width="2.5" stroke-dasharray="10 6" opacity="0.55" stroke-linecap="round"/>`;if(d.distanceText){const lx=(f.x+t.x)/2,ly=(f.y+t.y)/2-6;svg+=`<text x="${lx}" y="${ly}" text-anchor="middle" fill="#5D4037" font-size="9" font-family="serif" opacity="0.6" font-style="italic">${d.distanceText}</text>`;}}for(const m of movements){const f=locations.find(l=>l.id===m.fromId),t=locations.find(l=>l.id===m.toId);if(!f||!t)continue;const k=[m.fromId,m.toId].sort().join('-');if(drawn.has(k))continue;drawn.add(k);svg+=`<path d="M${f.x},${f.y} Q${(f.x+t.x)/2+((k.charCodeAt(0)%16)-8)},${(f.y+t.y)/2+((k.charCodeAt(1%k.length)%16)-8)} ${t.x},${t.y}" fill="none" stroke="#6B3A2A" stroke-width="2" stroke-dasharray="8 5" opacity="0.35" stroke-linecap="round"/>`;}for(const loc of locations){const cur=loc.id===currentLocationId,type=this._getLocType(loc.name);if(cur)svg+=`<circle cx="${loc.x}" cy="${loc.y}" r="28" fill="#CD853F" opacity="0.15" filter="url(#wt-glow)"/>`;svg+=this._fantasyIcon(loc.x,loc.y,type,cur,loc.visitCount||0,loc.id);svg+=`<text x="${loc.x}" y="${loc.y+24}" text-anchor="middle" fill="#3E2723" font-size="${cur?13:11}" font-weight="${cur?'700':'600'}" font-family="'Georgia',serif">${loc.name}</text>`;if(cur)svg+=`<text x="${loc.x}" y="${loc.y-24}" text-anchor="middle" font-size="14">🐾</text>`;}if(!locations.length)svg+=`<text x="${vb.x+vb.w/2}" y="${vb.y+vb.h/2}" text-anchor="middle" fill="#5D4037" font-size="14" font-family="serif" font-style="italic">모험을 시작해보세요... 🏰</text>`;svg+=this._compassRose(vb.x+32,vb.y+vb.h-32);this.svg.innerHTML=svg;}
+    _renderFantasy() { const{locations,movements,currentLocationId}=this.lm;if(locations.length>=2)this._autoLayout(locations,locations.find(l=>l.id===currentLocationId)||locations[0]);const cW=Math.max(this.container?.offsetWidth||600,300),cH=Math.max(this.container?.offsetHeight||400,300),aspect=cW/cH;if(locations.length){const pad=100,xs=locations.map(l=>l.x),ys=locations.map(l=>l.y),minX=Math.min(...xs)-pad,maxX=Math.max(...xs)+pad,minY=Math.min(...ys)-pad,maxY=Math.max(...ys)+pad,w=Math.max(400,maxX-minX),h=Math.max(300,maxY-minY,w/aspect);this.vb={x:minX,y:minY,w,h};}else{this.vb={x:0,y:0,w:600,h:Math.max(400,Math.round(600/aspect))};}this._applyVB();const vb=this.vb;let svg=`<defs><filter id="wt-glow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>`;const drawn=new Set();for(const m of movements){const f=locations.find(l=>l.id===m.fromId),t=locations.find(l=>l.id===m.toId);if(!f||!t)continue;const k=[m.fromId,m.toId].sort().join('-');if(drawn.has(k))continue;drawn.add(k);svg+=`<path d="M${f.x},${f.y} Q${(f.x+t.x)/2+((k.charCodeAt(0)%16)-8)},${(f.y+t.y)/2+((k.charCodeAt(1%k.length)%16)-8)} ${t.x},${t.y}" fill="none" stroke="#6B3A2A" stroke-width="2" stroke-dasharray="8 5" opacity="0.35" stroke-linecap="round"/>`;}for(const loc of locations){const cur=loc.id===currentLocationId,type=this._getLocType(loc.name);if(cur)svg+=`<circle cx="${loc.x}" cy="${loc.y}" r="28" fill="#CD853F" opacity="0.15" filter="url(#wt-glow)"/>`;svg+=this._fantasyIcon(loc.x,loc.y,type,cur,loc.visitCount||0,loc.id);svg+=`<text x="${loc.x}" y="${loc.y+24}" text-anchor="middle" fill="#3E2723" font-size="${cur?13:11}" font-weight="${cur?'700':'600'}" font-family="'Georgia',serif">${loc.name}</text>`;if(cur)svg+=`<text x="${loc.x}" y="${loc.y-24}" text-anchor="middle" font-size="14">🐾</text>`;}if(!locations.length)svg+=`<text x="${vb.x+vb.w/2}" y="${vb.y+vb.h/2}" text-anchor="middle" fill="#5D4037" font-size="14" font-family="serif" font-style="italic">모험을 시작해보세요... 🏰</text>`;svg+=this._compassRose(vb.x+32,vb.y+vb.h-32);this.svg.innerHTML=svg;}
     _getLocType(n){const l=n.toLowerCase();if(/성|castle|palace|궁|요새|tower|탑/.test(l))return'castle';if(/산|mountain|peak|봉/.test(l))return'mountain';if(/숲|forest|woods|jungle/.test(l))return'forest';if(/신전|temple|church|성당|교회/.test(l))return'temple';if(/마을|village|town/.test(l))return'village';if(/집|home|house|오두막/.test(l))return'house';if(/가게|shop|market|시장/.test(l))return'shop';if(/술집|tavern|bar|pub|inn|주막/.test(l))return'tavern';if(/동굴|cave|dungeon|지하/.test(l))return'cave';if(/항구|port|harbor|부두/.test(l))return'port';if(/강|river|lake|호수|바다|sea/.test(l))return'water';if(/학교|school|도서관|library/.test(l))return'library';if(/arena|훈련|체육|gym/.test(l))return'arena';return'flag';}
     _fantasyIcon(x,y,type,cur,v,id){const s=cur?1.15:1,em={castle:'🏰',mountain:'⛰️',forest:'🌲',temple:'⛪',village:'🏘️',house:'🏠',shop:'🏪',tavern:'🍺',cave:'🕳️',port:'⚓',water:'💧',library:'📚',arena:'⚔️',flag:'🪧'},e=em[type]||'📍',sz=cur?28:22;let svg=`<g transform="translate(${x},${y}) scale(${s})" class="wt-location-node" data-id="${id}">`;if(cur)svg+=`<circle r="20" fill="#CD853F" opacity="0.2" filter="url(#wt-glow)"/>`;svg+=`<text y="6" text-anchor="middle" font-size="${sz}" style="cursor:pointer;pointer-events:none;user-select:none">${e}</text>`;if(v>0)svg+=`<circle cx="14" cy="-8" r="7" fill="#DAA520" stroke="#5D4037" stroke-width="0.8"/><text x="14" y="-5" text-anchor="middle" fill="#3E2723" font-size="8" font-weight="700">${v}</text>`;svg+='</g>';return svg;}
     _compassRose(cx,cy){const s=22;return`<g transform="translate(${cx},${cy})"><circle r="${s}" fill="rgba(244,228,193,0.6)" stroke="#8B6914" stroke-width="1.2"/><circle r="${s*0.15}" fill="#8B6914"/><polygon points="0,${-s+3} -4,${-s*0.35} 4,${-s*0.35}" fill="#8B0000" stroke="#5D4037" stroke-width="0.5"/><polygon points="0,${s-3} -4,${s*0.35} 4,${s*0.35}" fill="#D4C5A0" stroke="#5D4037" stroke-width="0.5"/><text y="${-s-3}" text-anchor="middle" fill="#8B0000" font-size="8" font-weight="700" font-family="serif">N</text><text y="${s+9}" text-anchor="middle" fill="#5D4037" font-size="7" font-weight="600" font-family="serif">S</text></g>`;}

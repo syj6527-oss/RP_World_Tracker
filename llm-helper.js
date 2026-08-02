@@ -1,18 +1,103 @@
-// 🐶 World Tracker — llm-helper.js (Direct LLM Call)
-// generateQuietPrompt 우회 — 채팅 컨텍스트 없이 직접 API 호출
+// 🐾 Paw Map — llm-helper.js (Hybrid: Connection Profile + Direct API)
+// v0.9.51: llmMode='profile'(기본, ST 연결 프로필) | 'direct'(API 키 직접 호출 + Grounding/폴백 체인)
+// 동의 시스템(externalAiEnabled/shareRpData)은 두 모드 모두에 적용됨
 
 import { getContext, extension_settings } from '../../../extensions.js';
 import { EXTENSION_NAME } from './index.js';
+import { redactOutboundSecrets } from './secret-redaction.js';
 
 const dbg = (...a) => console.log(`[${EXTENSION_NAME}]`, ...a);
+
+let _requestInFlight = false;
+
+function _settings() {
+    return extension_settings?.[EXTENSION_NAME] || {};
+}
+
+function _setStatus(status, error = '') {
+    window._wtLastApiStatus = status;
+    if (error) window._wtLastLLMError = error;
+}
+
+function _safeError(error) {
+    const message = String(error?.message || error || '');
+    if (error?.name === 'AbortError' || /abort|timeout/i.test(message)) return '요청 시간 초과 또는 취소';
+    if (/Connection Manager is not available|profile service unavailable/i.test(message)) return '연결 프로필 서비스를 사용할 수 없음';
+    const status = message.match(/\b(?:4\d\d|5\d\d)\b/)?.[0];
+    return status ? `연결 프로필 요청 실패 (HTTP ${status})` : '연결 프로필 요청 실패';
+}
+
+async function _resolveConnectionService() {
+    const context = getContext();
+    let service = context?.ConnectionManagerRequestService;
+    if (!service?.sendRequest) {
+        try {
+            const module = await import('../../shared.js');
+            service = module.ConnectionManagerRequestService;
+        } catch (_) {}
+    }
+    return service?.sendRequest ? service : null;
+}
+
+// v0.9.51: 동의/사전 점검 — profile·direct 공통 게이트
+export async function preflightLLM(options = {}) {
+    const s = _settings();
+    const sensitive = options.sensitive !== false;
+    if (s.externalAiEnabled !== true) return { ok: false, error: '외부 AI 기능이 꺼져 있음 (설정에서 켜주세요)' };
+    if (sensitive && s.shareRpData !== true) return { ok: false, error: 'RP 원문 공유 동의가 꺼져 있음 (설정에서 켜주세요)' };
+    if (_requestInFlight) return { ok: false, error: '이미 확장 AI 요청이 진행 중' };
+
+    if ((s.llmMode || 'profile') === 'direct') {
+        // direct 모드: API 키 설정만 확인 (프로필 불필요)
+        const cfg = _getApiConfig();
+        if (!cfg) return { ok: false, error: 'API 키가 설정되지 않음 (설정 → 🔑 LLM API)' };
+        return { ok: true };
+    }
+    // profile 모드
+    if (!s.selectedProfile) return { ok: false, error: '선택된 연결 프로필이 없음' };
+    const service = await _resolveConnectionService();
+    if (!service) return { ok: false, error: '연결 프로필 서비스를 사용할 수 없음' };
+    try {
+        const supported = service.getSupportedProfiles?.();
+        if (Array.isArray(supported) && supported.length && !supported.some(profile => String(profile?.id || '') === String(s.selectedProfile))) {
+            return { ok: false, error: '저장된 연결 프로필을 현재 사용할 수 없음' };
+        }
+    } catch (_) {}
+    return { ok: true };
+}
+
+// v0.9.51: ST 연결 프로필 경유 1회 호출 (GPT v0.9.50 방식 유지)
+async function _callViaConnectionProfile(profileId, prompt, requestedTokens = 2048, timeoutMs = 60000) {
+    const service = await _resolveConnectionService();
+    if (!service) throw new Error('Connection profile service unavailable');
+    const tokenLimit = Number(requestedTokens);
+    const maxTokens = Math.max(256, Math.min(8192, Number.isFinite(tokenLimit) ? tokenLimit : 2048));
+    const controller = new AbortController();
+    const duration = Math.max(5000, Math.min(120000, Number(timeoutMs) || 60000));
+    const timer = setTimeout(() => controller.abort(), duration);
+    try {
+        const outboundPrompt = redactOutboundSecrets(prompt);
+        const response = await service.sendRequest(profileId, outboundPrompt, maxTokens, {
+            stream: false,
+            signal: controller.signal,
+            extractData: true,
+            includePreset: false,
+            includeInstruct: false,
+        });
+        if (typeof response === 'string') return response;
+        return response?.content || response?.text || response?.message?.content || response?.choices?.[0]?.message?.content || response?.choices?.[0]?.text || '';
+    } finally {
+        clearTimeout(timer);
+    }
+}
 
 // ========== ST API 설정 읽기 ==========
 function _getApiConfig() {
     try {
         // ★ 1순위: 우리 확장 설정에 저장된 API 키
         const s = extension_settings?.[EXTENSION_NAME];
-        // ★ Vertex AI: SA JSON 또는 API 키 (자동 판별) — provider=vertex(레거시) 또는 Gemini+useVertex
-        if (s?.llmProvider === 'vertex' || (s?.llmProvider === 'google' && s?.useVertex)) {
+        // ★ Vertex AI: SA JSON 또는 API 키 (자동 판별)
+        if (s?.llmProvider === 'vertex') {
             const model = s.llmModel || 'gemini-2.0-flash';
             // 우선 SA JSON 체크 (풀 권한)
             if (s?.vertexSaJson) {
@@ -420,14 +505,14 @@ function _parseServiceAccount(jsonStr) {
 // 서비스 계정 JSON 없이 짧은 API 키로 호출 — 2026년 정식 지원
 // 엔드포인트는 AI Studio와 달리 project/location 없음, 헤더로 인증
 async function _callVertexApiKey(apiKey, model, prompt) {
-    // v0.9.15: Vertex Express는 ?key= 쿼리 인증이 안정적 (x-goog-api-key 헤더로는 막히는 경우 있음)
-    const endpoint = `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const endpoint = `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:generateContent`;
     const _fetch = (body) => {
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), window._wtUseGrounding ? 90000 : 60000);
         return fetch(endpoint, {
             method: 'POST',
             headers: {
+                'x-goog-api-key': apiKey,
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify(body),
@@ -586,87 +671,88 @@ async function _callGoogleWithFallback(key, primaryModel, prompt) {
 }
 
 // ========== 메인 호출 함수 ==========
-// v0.9.16: SillyTavern 연결 프로필 경유 생성 (ConnectionManagerRequestService)
-//   ST 버전에 따라 없을 수 있으므로 방어적으로 접근 + 다양한 응답 형태 대응
-async function _callViaConnectionProfile(profileId, prompt) {
-    const ctx = getContext();
-    let svc = ctx?.ConnectionManagerRequestService
-        || (typeof window !== 'undefined' && window.ConnectionManagerRequestService);
-    if (!svc || typeof svc.sendRequest !== 'function') {
-        // shared.js에서 직접 가져오기 (ST 버전에 따라 위치/존재 다를 수 있어 방어적)
-        try { const mod = await import('../../shared.js'); svc = mod.ConnectionManagerRequestService; } catch (_) {}
-    }
-    if (!svc || typeof svc.sendRequest !== 'function') {
-        throw new Error('ConnectionManagerRequestService 사용 불가 (ST 업데이트 필요할 수 있음)');
-    }
-    const maxTokens = window._wtMaxTokensOverride ?? 4096;
-    dbg(`🔧 연결 프로필 생성 시도 (profile=${profileId}, max=${maxTokens})`);
-    const res = await svc.sendRequest(profileId, prompt, maxTokens);
-    if (res == null) return '';
-    if (typeof res === 'string') return res;
-    // 응답 형태 편차 대응 (content / text / message.content / choices[].message.content)
-    return res.content
-        || res.text
-        || res.message?.content
-        || res.choices?.[0]?.message?.content
-        || res.choices?.[0]?.text
-        || '';
-}
-
 export async function callLLM(prompt, options = {}) {
-    // v0.7.9: options.temperature 지원 (기본 0.7, 커뮤니티는 0.95 권장)
+    // v0.9.51 하이브리드: consent 게이트 → llmMode에 따라 profile/direct 라우팅
     const temp = options.temperature ?? 0.7;
-    if (temp !== 0.7) {
-        // 전역 오버라이드 플래그로 임시 적용 — 이번 호출만
-        window._wtTempOverride = temp;
-    }
-    // ★ 마지막 에러 저장 (디버깅용)
+    if (temp !== 0.7) window._wtTempOverride = temp;
     window._wtLastLLMError = null;
 
-    // v0.9.34: 토큰/thinking/temp 오버라이드는 "이번 호출만" — 끝나면(에러 포함) 무조건 정리(누수 방지)
-    try {
+    const s = _settings();
+    const preflight = await preflightLLM({ sensitive: options.sensitive !== false });
+    if (!preflight.ok) {
+        _setStatus('Request blocked', preflight.error);
+        dbg('🚫 LLM blocked:', preflight.error);
+        window._wtTempOverride = null;
+        return null;
+    }
 
-    // ★ v0.9.16: 방법 0 — 연결 프로필 (선택 시 우선). ConnectionManagerRequestService 경유.
-    //   실패하면 아래 기존 직접-API / 폴백 경로로 자연스럽게 넘어감 (회귀 방지)
-    const _s = extension_settings?.[EXTENSION_NAME];
-    if (_s?.selectedProfile) {
+    const mode = s.llmMode || 'profile';
+
+    // ── 모드 A: 연결 프로필 (기본) ──
+    if (mode === 'profile') {
+        _requestInFlight = true;
         try {
-            const out = await _callViaConnectionProfile(_s.selectedProfile, prompt);
-            if (out && out.trim()) {
-                window._wtLastApiStatus = `Connection profile: ${_s.selectedProfile}`;
-                dbg('🔧 LLM via connection profile OK');
-                return out;
+            const maxTokens = window._wtMaxTokensOverride || options.maxTokens || 2048;
+            const result = await _callViaConnectionProfile(s.selectedProfile, String(prompt || ''), maxTokens, options.timeoutMs);
+            window._wtLastApiStatus = `Connection profile used: ${s.selectedProfile}`;
+            if (result) {
+                window._wtLastRawResponse = result;
+                // 프로필 = 메인 모델일 수 있어 RP 이어쓰기 위험 → 필터 적용
+                if (_isRpContinuation(result)) {
+                    window._wtLastLLMError = 'Profile returned RP story (direct 모드 권장)';
+                    dbg('🚫 Profile returned RP continuation');
+                    return null;
+                }
+                dbg(`🔧 LLM profile OK (${result.length}c)`);
+                return result;
             }
-            dbg('⚠️ 연결 프로필 응답 비어있음 → 기존 경로로 폴백');
-        } catch (e) {
-            dbg('⚠️ 연결 프로필 경로 실패 → 폴백:', e.message);
-            window._wtLastLLMError = `Profile gen failed: ${e.message}`;
+            window._wtLastLLMError = window._wtLastLLMError || 'Profile returned empty';
+            return null;
+        } catch (error) {
+            _setStatus('Request failed', _safeError(error));
+            dbg('⚠️ LLM profile failed:', error.message);
+            return null;
+        } finally {
+            _requestInFlight = false;
+            window._wtTempOverride = null;
         }
     }
 
-    // ★ 방법 1: 직접 API 호출 (확장 설정 키 또는 ST 변수)
+    // ── 모드 B: 직접 API 호출 (v0.9.1 시스템 — Grounding/폴백/thinking 지원) ──
+    _requestInFlight = true;
+    try {
+        return await _callDirect(prompt, options);
+    } finally {
+        _requestInFlight = false;
+        window._wtTempOverride = null;
+    }
+}
+
+async function _callDirect(prompt, options = {}) {
+    // ★ 직접 API 호출 (확장 설정 키)
     const cfg = _getApiConfig();
-    // v0.8.1: 디버그 정보 저장 (API 설정 상태 추적)
     window._wtLastApiStatus = cfg
         ? `Direct API used: type=${cfg.type}, model=${cfg.model}${cfg.region ? `, region=${cfg.region}` : ''}, key=${cfg.key ? `***${cfg.key.slice(-4)}` : (cfg.sa ? `SA:${cfg.sa.project_id}` : 'none')}`
-        : 'NO API CONFIG — using fallback (generateQuietPrompt)';
+        : 'NO API CONFIG';
     dbg('🔧 API status:', window._wtLastApiStatus);
 
     if (cfg) {
         try {
             dbg(`🔧 LLM calling ${cfg.type} (${cfg.model}), prompt ${prompt.length}c`);
+            // v0.9.51: 발신 프롬프트에도 시크릿 마스킹 적용 (GPT 보안 컨셉 유지)
+            const outbound = redactOutboundSecrets(String(prompt || ''));
             let result = '';
-            if (cfg.type === 'google') result = await _callGoogleWithFallback(cfg.key, cfg.model, prompt);
-            else if (cfg.type === 'vertex') result = await _callVertex(cfg.sa, cfg.region, cfg.model, prompt);
-            else if (cfg.type === 'vertex_key') result = await _callVertexApiKey(cfg.key, cfg.model, prompt);
-            else if (cfg.type === 'openai') result = await _callOpenAI(cfg.key, cfg.model, prompt, cfg.url);
-            else if (cfg.type === 'claude') result = await _callClaude(cfg.key, cfg.model, prompt, cfg.url);
+            if (cfg.type === 'google') result = await _callGoogleWithFallback(cfg.key, cfg.model, outbound);
+            else if (cfg.type === 'vertex') result = await _callVertex(cfg.sa, cfg.region, cfg.model, outbound);
+            else if (cfg.type === 'vertex_key') result = await _callVertexApiKey(cfg.key, cfg.model, outbound);
+            else if (cfg.type === 'openai') result = await _callOpenAI(cfg.key, cfg.model, outbound, cfg.url);
+            else if (cfg.type === 'claude') result = await _callClaude(cfg.key, cfg.model, outbound, cfg.url);
 
             if (result) {
                 dbg(`🔧 LLM direct OK (${result.length}c)`);
+                window._wtLastRawResponse = result;
                 return result;
             }
-            // v0.8.5: 개별 API 함수가 이미 구체 에러 저장했으면 그대로 두고, 없을 때만 기본 메시지
             if (!window._wtLastLLMError || window._wtLastLLMError === 'No API config detected — check 설정 → 🔑 LLM API 키 입력') {
                 window._wtLastLLMError = 'Direct API returned empty (key? quota? thinking overflow?)';
             }
@@ -678,63 +764,7 @@ export async function callLLM(prompt, options = {}) {
     } else {
         window._wtLastLLMError = 'No API config detected — check 설정 → 🔑 LLM API 키 입력';
     }
-
-    // ★ 방법 2: Fallback — generateQuietPrompt (본체 모델, 컨텍스트 포함)
-    try {
-        const ctx = getContext();
-        const gen = ctx?.generateQuietPrompt;
-        if (gen) {
-            const { runWithoutAutoDetect } = await import('./index.js');
-            const result = await runWithoutAutoDetect(() => gen({ prompt }), 2500);
-            if (result) {
-                // v0.7.11: RP 마커 감지 — <memo>, OOC, yaml 캐릭터카드 등 있으면 즉시 거부
-                if (_isRpContinuation(result)) {
-                    window._wtLastLLMError = 'Fallback returned RP story (API 키 설정 권장)';
-                    dbg('🚫 Fallback returned RP continuation — rejecting and asking user to set API key');
-                    return null;
-                }
-                if (result.includes('{') && result.includes('}')) {
-                    dbg('🔧 LLM fallback (generateQuietPrompt) OK');
-                    return result;
-                } else {
-                    // v0.7.7: JSON 아니면 한번 더 재시도 — 프롬프트 앞에 강한 지시 추가
-                    dbg('⚠️ LLM fallback returned non-JSON, retrying with stricter instruction...');
-                    try {
-                        const strictPrompt = `[SYSTEM: Output raw JSON only. No prose, no narration, no story. Start with { and end with }. Nothing else. DO NOT continue the roleplay. DO NOT generate <memo>, <phone_trigger>, OOC, or any story text.]\n\n${prompt}`;
-                        const retry = await runWithoutAutoDetect(() => gen({ prompt: strictPrompt }), 2500);
-                        // v0.7.11: 재시도 결과도 RP 마커 체크
-                        if (retry && _isRpContinuation(retry)) {
-                            window._wtLastLLMError = 'Fallback retry also returned RP story';
-                            dbg('🚫 Fallback retry also RP — giving up');
-                            return null;
-                        }
-                        if (retry && retry.includes('{') && retry.includes('}')) {
-                            dbg('🔧 LLM fallback retry OK');
-                            return retry;
-                        }
-                        window._wtLastLLMError = 'Fallback retry also returned non-JSON';
-                        dbg('⚠️ LLM fallback retry also non-JSON');
-                    } catch(e2) {
-                        window._wtLastLLMError = 'Fallback retry: ' + e2.message;
-                        dbg('⚠️ LLM fallback retry failed:', e2.message);
-                    }
-                    return null;
-                }
-            }
-            window._wtLastLLMError = 'Fallback returned null';
-        }
-    } catch(e) {
-        window._wtLastLLMError = 'Fallback: ' + e.message;
-        dbg('⚠️ LLM fallback failed:', e.message);
-    }
-
     return null;
-    } finally {
-        // 이번 callLLM 호출에만 적용되는 오버라이드 정리 (누수 시 다른 호출이 256토큰 등에 걸리는 버그 방지)
-        window._wtMaxTokensOverride = null;
-        window._wtDisableThinking = false;
-        window._wtTempOverride = null;
-    }
 }
 
 // ========== 최근 채팅 맥락 추출 ==========

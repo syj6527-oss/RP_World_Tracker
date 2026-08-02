@@ -1,6 +1,5 @@
 // 🐶 World Tracker — detector.js (All Fixes + City Detection)
 
-import { EXTENSION_NAME } from './index.js';
 
 export class LocationDetector {
     constructor(lm) {
@@ -9,8 +8,10 @@ export class LocationDetector {
         this.suffixPat = [
             /(?:으로|로)\s*(?:향하|가|갔|걸어|이동|달려|뛰어|들어|나서|떠나|돌아|출발)/,
             /에\s*(?:도착|당도|다다|들어서|들어섰|왔다|갔다)/,
-            /에서\s*(?:나와|나왔|나서|나섰|벗어나)/,
-            /(?:을|를)\s*(?:나서|나섰|떠나|떠났|빠져나)/,
+        ];
+        this.departureSuffix = [
+            /에서\s*(?:나와|나왔|나서|나섰|떠나|떠났|벗어나|빠져나)/,
+            /(?:을|를)\s*(?:나서|나섰|떠나|떠났|벗어나|빠져나)/,
         ];
         this.presSuffix = [/에\s*(?:서 있|앉아|앉았|기대|서서)/, /에서\s*(?:앉|서|기다|머무)/];
 
@@ -152,7 +153,7 @@ export class LocationDetector {
         this.engMoveVerbs = [
             'headed to','walked to','went to','arrived at','arrived in','moved to',
             'returned to','ran to','rushed to','hurried to',
-            'entered','reached','reach','reaches','reaching','left','marched to',
+            'entered','reached','reach','reaches','reaching','marched to',
             'stepped into','burst into','stormed into','step into','pull into','pulled into',
             'made it to','make it to','got to','get to','stop by','stopped by','head into','heading to','heading into','landed at','landed in',
             'headed home','went home','got home','came home',
@@ -181,7 +182,12 @@ export class LocationDetector {
         this.namePrefix = ['mr','mrs','ms','miss','dr','captain','colonel','sergeant','general','professor','officer','sir','madam','lady','lord'];
 
         // placeWord 뒤에 이게 오면 장소 아님 (bug 18: "apartment door lock")
-        this.notPlaceSuffix = ['door','key','wall','window','floor','lock','roof','ceiling','gate','sign','number','building','complex'];
+        this.notPlaceSuffix = [
+            'door','key','wall','window','floor','lock','roof','ceiling','gate','sign','number','building','complex',
+            'chair','desk','soap','table','lamp','shirt','staff','worker','work','supplies','equipment',
+            'bell','exam','sandwich','party','chart','code','stool','counter','screen','page','button',
+            'service','temperature','uniform','bus','gown',
+        ];
 
         // #36: 도시명 감지 — 주요 도시/지역명 (한/영)
         this.cityNames = [
@@ -227,24 +233,35 @@ export class LocationDetector {
             for (const name of [loc.name, ...(loc.aliases || [])]) {
                 if (!name || name.length < 1) continue;
                 const nameLo = name.toLowerCase();
-                for (const idx of this._findAll(clean, nameLo)) {
+                for (const idx of this._findAllStrict(clean, nameLo)) {
+                    if (this._isObjectUse(clean, idx, nameLo)) continue;
                     const inDlg = this._inDlg(clean, idx);
+                    const before = clean.substring(Math.max(0, idx - 48), idx).trimEnd();
                     const after = clean.substring(idx + nameLo.length, idx + nameLo.length + 40);
-                    const para = this._para(clean, idx);
+                    const near = clean.substring(Math.max(0, idx - 45), Math.min(clean.length, idx + nameLo.length + 55));
 
                     // 같은 confidence면 뒤쪽 위치 우선 (최종 목적지)
                     const better = (c, i) => !best || c > best.confidence || (c === best.confidence && i > best.pos);
 
+                    // A named source ("left Club", "클럽에서 나왔다") is not the destination.
+                    if (!inDlg && this.departureSuffix.some(pattern => pattern.test(after))) continue;
                     if (!inDlg && this.suffixPat.some(p => p.test(after)) && !hasFut) {
+                        const c = 0.95; if (better(c, idx)) best = { location: loc, type: 'move', confidence: c, pos: idx }; continue;
+                    }
+                    const directEnglishMove = this.engMoveVerbs.some(verb => {
+                        const escaped = verb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        return new RegExp(`${escaped}(?:\\s+the)?\\s*$`, 'i').test(before);
+                    });
+                    if (!inDlg && directEnglishMove && !hasFut) {
                         const c = 0.95; if (better(c, idx)) best = { location: loc, type: 'move', confidence: c, pos: idx }; continue;
                     }
                     if (!inDlg && this.presSuffix.some(p => p.test(after))) {
                         const c = 0.7; if (better(c, idx)) best = { location: loc, type: 'present', confidence: c, pos: idx }; continue;
                     }
-                    if (this.moveKw.some(k => para.includes(k)) && !hasFut) {
+                    if (this.moveKw.some(k => near.includes(k)) && !hasFut) {
                         const c = inDlg ? 0.6 : 0.85; if (better(c, idx)) best = { location: loc, type: 'move', confidence: c, pos: idx }; continue;
                     }
-                    if (this.presKw.some(k => para.includes(k))) {
+                    if (this.presKw.some(k => near.includes(k))) {
                         const c = inDlg ? 0.4 : 0.6; if (better(c, idx)) best = { location: loc, type: 'present', confidence: c, pos: idx }; continue;
                     }
                     if (inDlg) {
@@ -270,7 +287,7 @@ export class LocationDetector {
 
         // v0.9.35: 알려진 도시/지역/국가가 이동 맥락과 함께 나오면 최우선 — 조각 단어(교차로→"교차", 카보 산 루카스→"루카스") 오인 방지
         const earlyCity = this._detectCity(nar);
-        if (earlyCity) { console.log(`[${EXTENSION_NAME}] 🆕 (city-priority): "${earlyCity}"`); return earlyCity; }
+        if (earlyCity) return earlyCity;
 
         // 한국어 방법 1: 조사 패턴 — USER만
         if (mode === 'user') {
@@ -281,6 +298,8 @@ export class LocationDetector {
                 if (!hasM) continue;
                 pPat.lastIndex = 0; let m;
                 while ((m = pPat.exec(para)) !== null) {
+                    const tail = para.substring(m.index + m[0].length, m.index + m[0].length + 18);
+                    if (/(?:나와|나왔|나서|나섰|떠나|떠났|벗어나|빠져나)/.test(tail)) continue;
                     let c = m[1].trim().replace(/으$/, '');
                     if (this._validKo(c)) { lastFound = c; }
                 }
@@ -291,7 +310,6 @@ export class LocationDetector {
         const dPat = [
             /([가-힣]{1,8}?)(?:으로|로)\s*(?:향하|가|갔|간다|걸어|이동|달려|돌아|출발)/g,
             /([가-힣]{1,8}?)에\s*(?:도착|당도|들어서|들어섰|왔다|갔다|간다)/g,
-            /([가-힣]{1,8}?)(?:을|를)\s*(?:나서|나섰|떠나|떠났)/g,
         ];
         for (const p of dPat) {
             p.lastIndex=0; let m;
@@ -303,11 +321,11 @@ export class LocationDetector {
             }
         }
 
-        if (lastFound) { console.log(`[${EXTENSION_NAME}] 🆕 (ko): "${lastFound}"`); return lastFound; }
+        if (lastFound) return lastFound;
 
         // 영어: "headed home" 특수 처리
         if (/\b(?:headed|went|got|came|arrived|returned|returning)\s+home\b/i.test(nar)) {
-            if (!this.lm.findByName('Home')) { console.log(`[${EXTENSION_NAME}] 🆕 (home)`); return 'Home'; }
+            if (!this.lm.findByNameExact('Home')) return 'Home';
         }
 
         // 영어 방법 3: 이동 동사 + 장소 단어
@@ -357,8 +375,8 @@ export class LocationDetector {
                 const mods = before.slice(-2).filter(w => !this.skipMods.includes(w.toLowerCase()) && !this._isSkip(w) && !w.includes('-') && w.length > 1);
                 if (mods.length) name = mods.join(' ') + ' ' + actual;
                 name = name.charAt(0).toUpperCase() + name.slice(1);
-                if (name.length >= 3 && name.length <= 30 && !this.lm.findByName(name)) {
-                    console.log(`[${EXTENSION_NAME}] 🆕 (en): "${name}"`); return name;
+                if (name.length >= 3 && name.length <= 30 && !this.lm.findByNameExact(name)) {
+                    return name;
                 }
             }
         }
@@ -375,14 +393,14 @@ export class LocationDetector {
         // 1) 도시명 매칭 (Bug F: 영어는 단어 경계 체크)
         const foodCtx = /chocolate|coffee|tea|cake|cookie|pizza|burger|steak|food|cuisine|restaurant|dish|recipe|flavor|taste|spice/i;
         for (const city of this.cityNames) {
-            if (this.lm.findByName(city)) continue;
+            if (this.lm.findByNameExact(city)) continue;
             // ★ 음식/브랜드 맥락이면 도시명 스킵 ("Dubai chocolate" → 스킵)
             if (foodCtx.test(clean)) continue;
             if (/[a-zA-Z]/.test(city)) {
                 const rx = new RegExp('\\b' + city.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
-                if (rx.test(clean)) { console.log(`[${EXTENSION_NAME}] 📋 desc city: "${city}"`); return city; }
+                if (rx.test(clean)) return city;
             } else {
-                if (lo.includes(city.toLowerCase())) { console.log(`[${EXTENSION_NAME}] 📋 desc city: "${city}"`); return city; }
+                if (lo.includes(city.toLowerCase())) return city;
             }
         }
 
@@ -403,8 +421,7 @@ export class LocationDetector {
             // ★ 서브장소 키워드 단독이면 독립 장소 등록 안 함 (#11)
             const bareSubKw = /^(?:room|kitchen|bathroom|bedroom|living\s*room|hall|lobby|office|garage|basement|attic|balcony|거실|부엌|주방|침실|화장실|방|복도|현관)s?$/i;
             if (bareSubKw.test(name)) continue;
-            if (name.length >= 3 && name.length <= 30 && !this.lm.findByName(name)) {
-                console.log(`[${EXTENSION_NAME}] 📋 desc place: "${name}"`);
+            if (name.length >= 3 && name.length <= 30 && !this.lm.findByNameExact(name)) {
                 return name;
             }
         }
@@ -414,15 +431,14 @@ export class LocationDetector {
         let km;
         while ((km = koPlaces.exec(clean)) !== null) {
             const c = km[1];
-            if (!this.skipKo.includes(c) && !this.lm.findByName(c)) {
-                console.log(`[${EXTENSION_NAME}] 📋 desc ko: "${c}"`);
+            if (!this.skipKo.includes(c) && !this.lm.findByNameExact(c)) {
                 return c;
             }
         }
         return null;
     }
 
-    // v0.9.44: 알려진 도시 → "City, Country" 영문 쿼리 (한국어 지명이 Nominatim 도시 결과에 안 뜨는 문제 해결)
+    // 알려진 도시 → "City, Country" 영문 쿼리 (다국어 검색 정확도 보강)
     cityGeoQuery(name) {
         if (!name) return name;
         const hint = {
@@ -486,11 +502,10 @@ export class LocationDetector {
             } else {
                 if (!lo.includes(cityLo)) continue;
             }
-            if (this.lm.findByName(city)) continue;
+            if (this.lm.findByNameExact(city)) continue;
             const idx = lo.indexOf(cityLo);
             const before = text.substring(Math.max(0, idx - 20), idx).trim().toLowerCase();
             if (this.namePrefix.some(np => before.endsWith(np) || before.endsWith(np + '.'))) continue;
-            console.log(`[${EXTENSION_NAME}] 🆕 (city): "${city}"`);
             return city;
         }
         return null;
@@ -500,7 +515,7 @@ export class LocationDetector {
         if (!c) return false;
         if (c.length === 1) return this.singleKo.includes(c);
         if (c.length > 8) return false;
-        if (this.lm.findByName(c)) return false;
+        if (this.lm.findByNameExact(c)) return false;
         if (this.skipKo.includes(c)) return false;
         if (c.length === 2 && /[을를이가에은는도로서]$/.test(c)) return false;
         // ★ 한국어 형용사/부사 접미사 → 장소 아님
@@ -633,6 +648,32 @@ export class LocationDetector {
 
     _strip(t) { return t.replace(/<[^>]+>/g,'').replace(/\*{1,2}([^*]+)\*{1,2}/g,'$1').replace(/_{1,2}([^_]+)_{1,2}/g,'$1').replace(/\[([^\]]*)\]/g, '$1'); }
     _findAll(t,n) { const r=[]; let p=0; while(true){ const i=t.indexOf(n,p); if(i===-1)break; r.push(i); p=i+1; } return r; }
+    _findAllStrict(text, name) {
+        return this._findAll(text, name).filter(index => this._hasNameBoundary(text, name, index));
+    }
+    _hasNameBoundary(text, name, index) {
+        const before = index > 0 ? text[index - 1] : '';
+        const after = text[index + name.length] || '';
+        const startsLatin = /^[a-z0-9]/i.test(name);
+        const endsLatin = /[a-z0-9]$/i.test(name);
+        if (startsLatin && before && /[a-z0-9]/i.test(before)) return false;
+        if (endsLatin && after && /[a-z0-9]/i.test(after)) return false;
+
+        if (/^[가-힣]+$/.test(name)) {
+            if (before && /[가-힣a-z0-9]/i.test(before)) return false;
+            if (after && /[가-힣]/.test(after)) {
+                const tail = text.slice(index + name.length, index + name.length + 4);
+                if (!/^(?:으로|에서|에게|로|에|을|를|의|은|는|이|가|와|과)/.test(tail)) return false;
+            }
+            if (name.length === 1 && !['집', '방', '역', '산', '강'].includes(name)) return false;
+        }
+        return true;
+    }
+    _isObjectUse(text, index, name) {
+        if (!/^[a-z]+$/i.test(name) || !this.placeWords.includes(name)) return false;
+        const tail = text.slice(index + name.length, index + name.length + 32);
+        return /^\s+(?:of\b|chair\b|desk\b|door\b|key\b|wall\b|window\b|floor\b|soap\b|table\b|lamp\b|shirt\b|staff\b|worker\b|work\b|supplies\b|equipment\b|bell\b|exam\b|sandwich\b|party\b|chart\b|code\b|stool\b|counter\b|screen\b|page\b|button\b|service\b|temperature\b|uniform\b|bus\b|gown\b)/i.test(tail);
+    }
     _inDlg(t,pos) { const b=t.substring(0,pos); for(const[o,c]of[['"','"'],['"','"'],['「','」']]){const lo=b.lastIndexOf(o);if(lo>-1&&lo>b.lastIndexOf(c))return true;} return false; }
     _getDlg(t,pos) { for(const[o,c]of[['"','"'],['"','"'],['「','」']]){const s=t.lastIndexOf(o,pos);if(s===-1)continue;const e=t.indexOf(c,s+1);if(e>-1&&e>=pos)return t.substring(s+1,e);} return null; }
     _para(t,pos) { const b=t.substring(Math.max(0,pos-200),pos); const a=t.substring(pos,Math.min(t.length,pos+200)); return b.substring(Math.max(b.lastIndexOf('\n'),0))+(a.indexOf('\n')!==-1?a.substring(0,a.indexOf('\n')):a); }

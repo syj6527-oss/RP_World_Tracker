@@ -1,18 +1,26 @@
-// 🐶 World Tracker v0.2.1-beta
+// 🐶 PAW MAP v0.9.50-secure-beta
 
 import { getContext, extension_settings } from '../../../extensions.js';
 import { eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';
-import { WorldTrackerDB } from './db.js';
+import { WorldTrackerDB, redactSecretFields } from './db.js';
 import { LocationManager } from './location-manager.js';
 import { LocationDetector } from './detector.js';
 import { PromptInjector } from './prompt-injector.js';
 import { UIManager } from './ui-manager.js';
 import { callLLM, parseLLMJson, getRecentChatContext } from './llm-helper.js';
+import { searchPlaces } from './geo-service.js';
+import { DetectionCandidateManager, suspiciousLocationReason } from './detection-candidates.js';
+import { stripNonNarrativeMetadata } from './rp-text-filter.js';
+import {
+    commitDetectedSubLocation,
+    findContextualExactLocation,
+    moveToDetectedLocation,
+    resolveTopLevelParent,
+} from './place-hierarchy.js';
 
 export const EXTENSION_NAME = 'rp-world-tracker';
 export const PROMPT_KEY = 'rp-world-tracker-prompt';
 let _autoDetectPauseCount = 0;
-let _lastUserNewLoc = null; // ★ 유저가 마지막으로 만든 장소 (AI 중복 방지)
 
 export async function runWithoutAutoDetect(task, cooldownMs = 1500) {
     _autoDetectPauseCount++;
@@ -96,19 +104,51 @@ function _showNoti(msg, type, duration) {
 export function toastWarn(msg) { wtNotify(msg, 'warn', 3000); }
 export function toastSuccess(msg) { wtNotify(msg, 'move', 2000); }
 
+function plainText(value, maxLength = 1000) {
+    return String(value || '')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/[<>]/g, ' ')
+        .replace(/"/g, '”')
+        .replace(/'/g, '’')
+        .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim()
+        .slice(0, maxLength);
+}
+
+function firstGrapheme(value, fallback = '👤') {
+    const text = plainText(value, 12);
+    if (!text) return fallback;
+    try { return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)][0]?.segment || fallback; }
+    catch (_) { return Array.from(text)[0] || fallback; }
+}
+
 const defaults = {
-    // v0.9.0: autoDetect 기본 OFF — 수동 모드로 전환 (드래그 이벤트 등록만 자동)
-    // v0.9.2: autoDetect는 "모든 자동 장소 감지"의 마스터 스위치 (캐릭터시트 추출 포함). 기본 OFF 유지.
-    // v0.9.23: detectMode = 'off'(수동) | 'confirm'(팝업 확인) | 'auto'(자동). autoEvent = 텍스트에서 이벤트 자동 추출 on/off
-    enabled:true, autoDetect:false, detectMode:'off', autoEvent:true, autoSchedule:false, showDetectToast:true,
+    // v0.9.51: Yun 확정 정책
+    //   - 자동 감지 기본 OFF (후보함 시스템은 유지 — 켜면 후보함으로 격리됨)
+    //   - aiInjection 기본 ON (장소 컨텍스트 주입 = 확장의 핵심 기능)
+    //   - dragEvent 기본 ON (유일하게 유지하는 자동 입력 수단)
+    //   - llmMode: 'profile'(기본, ST 연결 프로필) | 'direct'(API 키 직접 입력)
+    enabled:true, autoDetect:false, detectMode:'off', autoEvent:false, autoSchedule:false, showDetectToast:true,
     aiInjection:true, memoryMode:'natural', memorySummaryDays:7, panelOpacity:100,
     debugMode:false, mapMode:'leaflet', fantasyTheme:false,
     eventLang:'auto', // auto=RP언어, ko=한국어, en=English
     worldContinuity:false, // 세계관 이어가기 (캐릭터 기반 저장)
-    dragEvent:true, // v0.9.2: 드래그 → 요약 아이콘(이벤트 기록) on/off
+    dragEvent:true, // 드래그 → 이벤트 저장 (기본 ON)
+    // v0.9.46 security defaults: every potentially billable/private external action is opt-in.
+    externalAiEnabled:false,
+    shareRpData:false,
+    allowAutoGeocoding:false,
+    showGoogleLinks:false, // 구글 지도 바로가기 버튼 (설정 옵션) — Street View는 이 옵션과 무관하게 항상 표시
+    mapSearchLanguage:'ko',
+    openMapStyle:'liberty',
+    llmMode:'profile', // v0.9.51: 'profile' | 'direct'
+    llmProvider:'google', llmModel:'gemini-2.5-flash', llmApiKey:'', vertexSaJson:'', vertexRegion:'',
+    locationEnrichment:'off', // off | overpass | grounding(direct+google 전용)
 };
 
-let db, lm, det, pi, ui;
+let db, lm, det, pi, ui, detectionCandidates;
 let _userContext = ''; // 유저 입력 컨텍스트 (이벤트 추출용)
 
 // ========== 채팅 화면 활성 여부 (캐릭터 설정/선택 화면 방지) ==========
@@ -121,32 +161,132 @@ function isChatActive() {
 }
 
 export async function loadLeaflet() {
-    if (window.L) return true;
+    if (window.maplibregl?.Map) return true;
     try {
-        if (!document.querySelector('link[href*="leaflet"]')) {
+        if (!document.querySelector('link[data-wt-maplibre]')) {
             const link = document.createElement('link'); link.rel = 'stylesheet';
-            link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+            link.dataset.wtMaplibre = '1';
+            link.href = new URL('./vendor/maplibre/maplibre-gl.css', import.meta.url).href;
             document.head.appendChild(link);
         }
-        return new Promise((resolve) => {
-            const script = document.createElement('script');
-            script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-            script.onload = () => { console.log(`[${EXTENSION_NAME}] Leaflet loaded!`); resolve(true); };
-            script.onerror = () => { console.warn(`[${EXTENSION_NAME}] Leaflet CDN failed`); resolve(false); };
-            document.head.appendChild(script);
-        });
-    } catch(e) { console.warn(`[${EXTENSION_NAME}] Leaflet load error:`, e); return false; }
+        const moduleUrl = new URL('./vendor/maplibre/maplibre-gl.mjs', import.meta.url).href;
+        const module = await import(moduleUrl);
+        if (!module?.Map) return false;
+        window.maplibregl = module;
+        return true;
+    } catch (_) { return false; }
 }
 
 function dbg(msg) {
     const s = extension_settings[EXTENSION_NAME];
     if (s?.debugMode) wtNotify(`🔧 ${msg}`, 'info', 3000);
-    console.log(`[${EXTENSION_NAME}] ${msg}`);
+}
+
+let _autoPlaceCommitChain = Promise.resolve();
+const _autoPlaceCommitPending = new Set();
+const isStandaloneInternalLabel = name =>
+    suspiciousLocationReason({ name, parentId: '' }) === '상위 장소 없이 등록된 내부 장소';
+
+async function commitDetectedPlace(candidate) {
+    if (!candidate || !lm?.currentChatId) return null;
+    if (candidate.chatKey && candidate.chatKey !== lm.currentChatId) return null;
+    const source = ['character', 'schedule'].includes(candidate.source) ? candidate.source : 'detected';
+
+    // Final guard: a bare indoor label must never become a world-map place.
+    // When a real current parent exists, preserve automatic sub-place creation.
+    if (isStandaloneInternalLabel(candidate.name) || candidate.kind === 'sub') {
+        const parent = resolveTopLevelParent(lm, candidate.name, candidate.parentId, LocationManager.PLACE_DICT);
+        if (!parent) return null;
+        candidate = { ...candidate, kind: 'sub', parentId: parent.id };
+    }
+
+    if (candidate.kind === 'sub') {
+        return commitDetectedSubLocation(lm, candidate.parentId, candidate.name, candidate.rpDate, LocationManager.PLACE_DICT);
+    }
+
+    let location = candidate.existingId
+        ? lm.locations.find(item => item.id === candidate.existingId)
+        : lm.findByNameExact(candidate.name);
+    let created = false;
+    if (!location) {
+        location = await lm.addLocation(candidate.name, '', [], { source });
+        created = Boolean(location);
+    }
+    if (!location) return null;
+
+    if (candidate.kind === 'planned') {
+        await lm.updateLocation(location.id, {
+            tags: [...new Set([...(location.tags || []), 'wantToGo'])],
+            _tempAddress: location._approximateCoordinates === true || !location.address,
+        });
+    } else if (candidate.kind === 'current' || candidate.kind === 'relative') {
+        await lm.moveTo(location.id, candidate.rpDate);
+    }
+
+    // 사용자가 따로 켠 경우에만 감지 장소명을 Photon에 보내 추정 핀을 실제 좌표로 교체한다.
+    if (created && extension_settings[EXTENSION_NAME]?.allowAutoGeocoding === true && !location.parentId && !lm.isSubLocation(location.name)) {
+        const current = lm.locations.find(item => item.id === lm.currentLocationId && item.lat != null && item.lng != null && !item.parentId);
+        const geocoded = await _geocodeQuiet(location.name, false, current ? { lat: current.lat, lng: current.lng } : null);
+        if (geocoded) {
+            location = await lm.updateLocation(location.id, {
+                lat: geocoded.lat, lng: geocoded.lng, address: geocoded.addr,
+                _approximateCoordinates: false, _approximateAnchorId: null,
+                _tempAddress: false, _geoFixed: true, _geocodeSuppressed: false,
+            });
+        }
+    }
+
+    pi?.inject();
+    if (ui?.panelVisible) ui.refresh();
+    if (extension_settings[EXTENSION_NAME]?.showDetectToast) {
+        wtNotify(`${wtMascot()} 📍 ${location.name}${location._approximateCoordinates ? ' · 추정 핀' : ''}`, 'move', 2600);
+    }
+    return location;
+}
+
+function queueDetectedPlace(name, options = {}) {
+    if (!detectionCandidates) return { queued: false };
+    const prepared = { ...options };
+    // Normalize every internal-place source before it reaches the queue. This
+    // includes detector, metadata, promise and legacy callers.
+    if (prepared.kind === 'sub' || isStandaloneInternalLabel(name)) {
+        const parent = resolveTopLevelParent(lm, name, prepared.parentId, LocationManager.PLACE_DICT);
+        prepared.kind = 'sub';
+        prepared.parentId = parent?.id || '';
+        if (!parent) {
+            prepared.autoCommit = false;
+            prepared.confidence = Math.min(0.5, Number(prepared.confidence) || 0.5);
+            prepared.reason = '내부 장소이지만 연결할 상위 장소가 아직 없음';
+        }
+    }
+    const result = detectionCandidates.add(name, prepared);
+    const mode = extension_settings[EXTENSION_NAME]?.detectMode || (extension_settings[EXTENSION_NAME]?.autoDetect ? 'auto' : 'off');
+    const candidate = result.candidate;
+    const shouldTryAutoCommit = result.queued && candidate && mode === 'auto' && prepared.autoCommit !== false &&
+        (!result.duplicate || result.parentContextUpdated === true) && !_autoPlaceCommitPending.has(candidate.id);
+    if (shouldTryAutoCommit) {
+        _autoPlaceCommitPending.add(candidate.id);
+        _autoPlaceCommitChain = _autoPlaceCommitChain
+            .then(async () => {
+                if (!detectionCandidates.list().some(item => item.id === candidate.id)) return null;
+                const committed = await commitDetectedPlace(candidate);
+                if (committed) detectionCandidates.dismiss(candidate.id);
+                return committed;
+            })
+            .catch(() => null)
+            .finally(() => _autoPlaceCommitPending.delete(candidate.id));
+        return { ...result, autoCommitted: true, commitPromise: _autoPlaceCommitChain };
+    }
+    if (result.queued && !result.duplicate && extension_settings[EXTENSION_NAME]?.showDetectToast) {
+        wtNotify(`🪧 장소 후보: ${result.candidate.name}`, 'info', 2600);
+    }
+    if (result.rejected) dbg(`🚫 장소 후보 격리 필터: ${result.reason}`);
+    return result;
 }
 
 // ========== 메시지 스캔 (USER/AI 감도 분리) ==========
 // v0.9.41: detectMode 도입으로 자동 감지 재활성화 — 실제 로직(_legacyScanMessage) 연결.
-//   detectMode='off'(기본)이면 _legacyScanMessage 내부에서 즉시 return하므로 옵트인 안전.
+//   detectMode='off'이면 _legacyScanMessage 내부에서 즉시 return한다.
 async function scanMessage(text, source = 'USER') {
     return await _legacyScanMessage(text, source);
 }
@@ -178,35 +318,28 @@ async function _legacyScanMessage(text, source = 'USER') {
         if (lm.currentLocationId) {
             try {
                 const promisePlace = det.detectPromisePlace(text);
-                if (promisePlace && !lm.findByName(promisePlace)) {
-                    const loc = await lm.addLocation(promisePlace);
-                    if (loc) {
-                        loc.tags = ['wantToGo'];
-                        loc._tempAddress = true;
-                        loc.memo = '📅 약속 장소 (주소 미확정)';
-                        if (!loc.events) loc.events = [];
-                        loc.events.push({ text: `📅 약속 장소로 등록됨`, title: '약속 장소', mood: '📅', timestamp: Date.now(), rpDate, source: 'auto' });
-                        await lm.updateLocation(loc.id, { tags: loc.tags, events: loc.events, _tempAddress: true, memo: loc.memo });
-                        dbg(`📅 Promise place (early): "${promisePlace}" (temp address)`);
-                        if (extension_settings[EXTENSION_NAME]?.showDetectToast) wtNotify(`📅 약속 장소: ${promisePlace} (주소 미확정)`, 'new', 3500);
-                        pi.inject(); if (ui?.panelVisible) ui.refresh();
-                    }
+                if (promisePlace && !lm.findByNameExact(promisePlace)) {
+                    queueDetectedPlace(promisePlace, {
+                        source: 'promise', kind: 'planned', confidence: 0.56,
+                        reason: '미래 약속 문맥에서 찾음 — 약속 문구 자체일 수 있어 확인 필요',
+                        snippet: text, rpDate,
+                    });
                 }
             } catch(e) { dbg('⚠️ Promise detect error:', e.message); }
         }
 
         // ★ 메타데이터에서 Location 직접 추출 (memo/yaml 블록)
         // HTML 태그 제거 후 다양한 포맷 매칭
-        const cleanForMeta = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+        const cleanForMeta = text.replace(/<[^>]*>/g, ' ').replace(/[ \t]+/g, ' ');
         const locPatterns = [
-            /[-*•]\s*Location\s*[:：]\s*(.+)/i,
-            /Location\s*[:：]\s*(.+)/i,
-            /📍\s*Location\s*[:：]\s*(.+)/i,        // ★ Celia/P&C 이모지 형식
-            /[-*•]\s*장소\s*[:：]\s*(.+)/,
-            /[-*•]\s*위치\s*[:：]\s*(.+)/,
-            /[-*•]\s*Place\s*[:：]\s*(.+)/i,
-            /[-*•]\s*Scene\s*[:：]\s*(.+)/i,
-            /[-*•]\s*Current\s+Location\s*[:：]\s*(.+)/i,
+            /[-*•]\s*Location\s*[:：]\s*([^\r\n]{1,120})/i,
+            /Location\s*[:：]\s*([^\r\n]{1,120})/i,
+            /📍\s*Location\s*[:：]\s*([^\r\n]{1,120})/i,
+            /[-*•]\s*장소\s*[:：]\s*([^\r\n]{1,120})/,
+            /[-*•]\s*위치\s*[:：]\s*([^\r\n]{1,120})/,
+            /[-*•]\s*Place\s*[:：]\s*([^\r\n]{1,120})/i,
+            /[-*•]\s*Scene\s*[:：]\s*([^\r\n]{1,120})/i,
+            /[-*•]\s*Current\s+Location\s*[:：]\s*([^\r\n]{1,120})/i,
         ];
         let locMatch = null;
         for (const pat of locPatterns) {
@@ -215,7 +348,7 @@ async function _legacyScanMessage(text, source = 'USER') {
         }
         // 원본 텍스트에서도 시도 (HTML 태그 안에 있을 수 있음)
         if (!locMatch) {
-            const m2 = text.match(/[-*•]\s*Location\s*[:：]\s*(.+)/i);
+            const m2 = text.match(/[-*•]\s*Location\s*[:：]\s*([^\r\n]{1,120})/i);
             if (m2) locMatch = m2;
         }
         if (locMatch) {
@@ -282,22 +415,34 @@ async function _legacyScanMessage(text, source = 'USER') {
                     }
                 }
 
-                // ★★★ 별칭 키워드 매칭 (서브 분리 전에 먼저!) — "SAS 북부 무기고" → 별칭 "무기고" 히트
-                const metaLower_pre = metaLoc.toLowerCase();
-                const aliasHit = lm.locations.find(l => {
-                    return (l.aliases || []).some(a => {
-                        const al = a.toLowerCase();
-                        return al.length >= 2 && metaLower_pre.includes(al);
-                    });
-                });
+                // ★★★ 별칭 키워드 매칭 (서브 분리 전에 먼저!) — 현재 부모의
+                // 동일 이름 child를 우선하며, 다른 부모의 Room은 빌려오지 않는다.
+                const aliasHit = findContextualExactLocation(lm, metaLoc);
                 if (aliasHit) {
-                    if (lm.currentLocationId !== aliasHit.id) {
-                        await lm.moveTo(aliasHit.id, rpDate);
+                    // 구버전이 최상위에 만든 bare Room은 보존하되 다시 현재 위치로
+                    // 사용하지 않는다. 유효한 현재 부모가 있으면 그 아래 child로 생성한다.
+                    if (!aliasHit.parentId && isStandaloneInternalLabel(aliasHit.name)) {
+                        const parent = resolveTopLevelParent(lm, aliasHit.name, '', LocationManager.PLACE_DICT);
+                        queueDetectedPlace(aliasHit.name, {
+                            source: 'meta', kind: 'sub', parentId: parent?.id || '', confidence: 0.64,
+                            reason: parent ? `“${parent.name}” 내부 장소로 다시 연결` : '상위 장소 없이 등록된 내부 장소 — 부모 선택 필요',
+                            snippet: text, rpDate, autoCommit: false,
+                        });
+                        if (_dm === 'auto' && parent?.id) await _tryEvent(text, parent.id, source);
+                        return true;
+                    }
+                    if (_dm !== 'auto') {
+                        queueDetectedPlace(aliasHit.name, {
+                            source: 'meta', kind: aliasHit.parentId ? 'sub' : 'current', parentId: aliasHit.parentId || '', confidence: 0.94,
+                            reason: '상태창 이름이 기존 장소/별칭과 정확히 일치', snippet: text, rpDate,
+                        });
+                    } else {
+                        await moveToDetectedLocation(lm, aliasHit, rpDate);
                         if (s.showDetectToast) wtNotify(`${wtMascot()} ${wtTreat()} ${aliasHit.name}`, 'move');
                         pi.inject(); if (ui.panelVisible) ui.refresh();
                     }
                     dbg(`🔗 Alias keyword hit: "${metaLoc}" → "${aliasHit.name}"`);
-                    await _tryEvent(text, aliasHit.id, source);
+                    if (_dm === 'auto') await _tryEvent(text, aliasHit.id, source);
                     return true;
                 }
 
@@ -326,6 +471,7 @@ async function _legacyScanMessage(text, source = 'USER') {
                         const candidateSub = subMatch[2].trim();
                         // 부모 후보가 기존 장소와 매칭되는지 확인
                         const parentCheck = lm.locations.find(l => {
+                            if (l.parentId) return false;
                             const n = l.name.toLowerCase();
                             const cp = candidateParent.toLowerCase();
                             return n === cp || n.includes(cp) || cp.includes(n) ||
@@ -345,6 +491,7 @@ async function _legacyScanMessage(text, source = 'USER') {
                     if (floorMatch) {
                         const candidateParent = floorMatch[1].trim();
                         const parentCheck = lm.locations.find(l => {
+                            if (l.parentId) return false;
                             const n = l.name.toLowerCase();
                             const cp = candidateParent.toLowerCase();
                             return n === cp || n.includes(cp) || cp.includes(n) ||
@@ -360,22 +507,39 @@ async function _legacyScanMessage(text, source = 'USER') {
 
                 // 분리된 경우: 부모 장소 매칭 → 서브 등록
                 if (metaParent && metaSub) {
-                    const parentLoc = lm.locations.find(l =>
+                    const parentLoc = lm.locations.find(l => !l.parentId && (
                         l.name.toLowerCase() === metaParent.toLowerCase() ||
                         metaParent.toLowerCase().includes(l.name.toLowerCase()) ||
                         l.name.toLowerCase().includes(metaParent.toLowerCase()) ||
                         (l.aliases || []).some(a => metaParent.toLowerCase().includes(a.toLowerCase()))
-                    );
+                    ));
                     if (parentLoc) {
                         // 서브장소 "&"로 나뉜 경우 첫번째만 사용 ("Kitchen & Living Room" → "Kitchen")
                         const subName = metaSub.split(/\s*[&,+]\s*/)[0].trim();
-                        const sub = await lm.findOrCreateSub(parentLoc.id, subName);
-                        if (lm.currentLocationId !== parentLoc.id) await lm.moveTo(parentLoc.id, rpDate);
-                        await lm.moveToSub(sub.id);
-                        dbg(`🏠 Meta sub-location: "${parentLoc.name} > ${subName}"`);
-                        if (s.showDetectToast) wtNotify(`🏠 ${parentLoc.name} > ${subName}`, 'move', 2500);
-                        pi.inject(); if (ui.panelVisible) ui.refresh();
-                        await _tryEvent(text, sub.id, source);
+                        const existingSub = lm.getSubLocations(parentLoc.id).find(sub =>
+                            sub.name.toLowerCase() === subName.toLowerCase() ||
+                            (sub.aliases || []).some(alias => alias.toLowerCase() === subName.toLowerCase())
+                        );
+                        if (existingSub) {
+                            if (_dm === 'auto') {
+                                if (lm.currentLocationId !== parentLoc.id) await lm.moveTo(parentLoc.id, rpDate);
+                                await lm.moveToSub(existingSub.id);
+                                pi.inject(); if (ui.panelVisible) ui.refresh();
+                                await _tryEvent(text, existingSub.id, source);
+                            } else {
+                                queueDetectedPlace(existingSub.name, {
+                                    source: 'meta', kind: 'sub', confidence: 0.92,
+                                    reason: `기존 “${parentLoc.name}” 내부 장소와 정확히 일치`, parentId: parentLoc.id,
+                                    snippet: text, rpDate,
+                                });
+                            }
+                        } else {
+                            queueDetectedPlace(subName, {
+                                source: 'meta', kind: 'sub', confidence: 0.78,
+                                reason: `“${parentLoc.name}” 내부 장소 후보`, parentId: parentLoc.id,
+                                snippet: text, rpDate,
+                            });
+                        }
                         return true;
                     }
                     // 부모 못 찾으면 원본 복원 (무기고 등 핵심 키워드 유지!)
@@ -388,90 +552,80 @@ async function _legacyScanMessage(text, source = 'USER') {
                 const metaClean = metaLoc.replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
 
                 // ★ 서브로케이션 체크 (거실, 부엌 등 → 현재 장소의 하위)
-                if (lm.isSubLocation(metaClean) && lm.currentLocationId) {
-                    const sub = await lm.findOrCreateSub(lm.currentLocationId, metaClean);
-                    await lm.moveToSub(sub.id);
-                    const curLoc = lm.locations.find(l => l.id === lm.currentLocationId);
-                    dbg(`🏠 Sub-location: "${curLoc?.name} > ${metaClean}"`);
-                    if (s.showDetectToast) wtNotify(`🏠 ${curLoc?.name} > ${metaClean}`, 'move', 2500);
-                    pi.inject();
-                    await _tryEvent(text, sub.id, source);
+                // 부모 장소가 아직 없으면 독립 장소로 만들거나 전 세계 지오코딩을
+                // 하지 않고, 부모를 고를 수 있는 메모리 후보로만 보류한다.
+                const currentParent = resolveTopLevelParent(lm, metaClean, '', LocationManager.PLACE_DICT);
+                if (lm.isSubLocation(metaClean) && !currentParent) {
+                    queueDetectedPlace(metaClean, {
+                        source: 'meta', kind: 'sub', confidence: 0.5,
+                        reason: '내부 장소이지만 연결할 상위 장소가 아직 없음',
+                        snippet: text, rpDate, autoCommit: false,
+                    });
+                    return true;
+                }
+                if (lm.isSubLocation(metaClean) && currentParent) {
+                    const curLoc = currentParent;
+                    const existingSub = lm.getSubLocations(currentParent.id).find(sub =>
+                        sub.name.toLowerCase() === metaClean.toLowerCase() ||
+                        (sub.aliases || []).some(alias => alias.toLowerCase() === metaClean.toLowerCase())
+                    );
+                    if (existingSub) {
+                        if (_dm === 'auto') {
+                                if (lm.currentLocationId !== currentParent.id) await lm.moveTo(currentParent.id, rpDate);
+                                await lm.moveToSub(existingSub.id);
+                            pi.inject();
+                            await _tryEvent(text, existingSub.id, source);
+                        } else {
+                            queueDetectedPlace(existingSub.name, {
+                                source: 'meta', kind: 'sub', confidence: 0.92,
+                                reason: `기존 “${curLoc?.name || '현재 장소'}” 내부 장소와 정확히 일치`, parentId: currentParent.id,
+                                snippet: text, rpDate,
+                            });
+                        }
+                    } else {
+                        queueDetectedPlace(metaClean, {
+                            source: 'meta', kind: 'sub', confidence: 0.76,
+                            reason: `“${curLoc?.name || '현재 장소'}” 내부 장소 후보`, parentId: currentParent.id,
+                            snippet: text, rpDate,
+                        });
+                    }
                     return true;
                 }
 
-                // ★ 기존 장소 매칭 — 부분 포함 + 단어 겹침 검사
-                const metaLower = metaLoc.toLowerCase();
-                const metaCleanLower = (metaClean || metaLoc).toLowerCase();
-                // 메타데이터에서 핵심 단어 추출 (2글자 이상)
-                const metaWords = new Set(metaLower.replace(/[()[\]{}"',./\\-]/g, ' ').split(/\s+/).filter(w => w.length >= 2));
-
-                const existing = lm.locations.find(l => {
-                    const n = l.name.toLowerCase();
-                    // 1. 정확히 일치
-                    if (n === metaLower || n === metaCleanLower) return true;
-                    // 2. 기존 이름이 메타데이터에 포함
-                    if (n.length >= 2 && (metaLower.includes(n) || metaCleanLower.includes(n))) return true;
-                    // 3. 메타데이터가 기존 이름에 포함
-                    if (metaCleanLower.length >= 3 && n.includes(metaCleanLower)) return true;
-                    // 4. 별칭 매칭
-                    if ((l.aliases || []).some(a => {
-                        const al = a.toLowerCase();
-                        return al === metaLower || al === metaCleanLower || (al.length >= 2 && metaLower.includes(al)) || (metaCleanLower.length >= 3 && al.includes(metaCleanLower));
-                    })) return true;
-                    // 5. ★ 단어 겹침 매칭 (핵심 단어 50%+ 겹치면 같은 곳)
-                    const locWords = new Set(n.replace(/[()[\]{}"',./\\-]/g, ' ').split(/\s+/).filter(w => w.length >= 2));
-                    const allAliasWords = (l.aliases || []).flatMap(a => a.toLowerCase().split(/\s+/).filter(w => w.length >= 2));
-                    allAliasWords.forEach(w => locWords.add(w));
-                    if (locWords.size >= 1 && metaWords.size >= 1) {
-                        let overlap = 0;
-                        for (const w of metaWords) { if (locWords.has(w)) overlap++; }
-                        if (overlap >= 1 && overlap / Math.min(locWords.size, metaWords.size) >= 0.4) return true;
-                    }
-                    return false;
-                });
+                // v0.9.47: automatic movement only accepts exact normalized names/aliases.
+                // Partial-word and word-overlap matches are suggestions, not proof.
+                const existing = findContextualExactLocation(lm, metaLoc) || findContextualExactLocation(lm, metaClean);
                 if (existing) {
-                    if (lm.currentLocationId !== existing.id) {
-                        await lm.moveTo(existing.id, rpDate);
+                    if (!existing.parentId && isStandaloneInternalLabel(existing.name)) {
+                        const parent = resolveTopLevelParent(lm, existing.name, '', LocationManager.PLACE_DICT);
+                        queueDetectedPlace(existing.name, {
+                            source: 'meta', kind: 'sub', parentId: parent?.id || '', confidence: 0.64,
+                            reason: '구버전 최상위 내부 장소 — 부모 확인 필요', snippet: text, rpDate, autoCommit: false,
+                        });
+                        if (_dm === 'auto' && parent?.id) await _tryEvent(text, parent.id, source);
+                        return true;
+                    }
+                    if (_dm !== 'auto') {
+                        queueDetectedPlace(existing.name, {
+                            source: 'meta', kind: existing.parentId ? 'sub' : 'current', parentId: existing.parentId || '', confidence: 0.94,
+                            reason: '상태창 이름이 기존 장소/별칭과 정확히 일치', snippet: text, rpDate,
+                        });
+                    } else {
+                        await moveToDetectedLocation(lm, existing, rpDate);
                         if (s.showDetectToast) wtNotify(`${wtMascot()} ${wtTreat()} ${existing.name}`, 'move');
                         pi.inject(); if (ui.panelVisible) ui.refresh();
                     }
-                    await _tryEvent(text, existing.id, source);
+                    if (_dm === 'auto') await _tryEvent(text, existing.id, source);
                     return true;
                 } else {
-                    // 새 장소 등록
-                    if (!lm.currentChatId) await lm.loadChat();
-                    if (lm.currentChatId) {
-                        // ★ 위치 기반 중복 방지: AI가 현재 위치의 다른 이름을 언급한 경우
-                        if (mode === 'ai' && lm.currentLocationId) {
-                            const curLoc = lm.locations.find(l => l.id === lm.currentLocationId);
-                            // ★ AI 메타데이터 Location은 대부분 현재 위치의 변형 → 항상 별칭으로 처리
-                            if (curLoc) {
-                                dbg(`🔀 AI meta loc "${metaLoc}" at current "${curLoc.name}" → auto-alias`);
-                                const aliases = [...new Set([...(curLoc.aliases || []), metaLoc, metaClean].filter(Boolean))];
-                                await lm.updateLocation(curLoc.id, { aliases });
-                                wtNotify(`📎 "${metaLoc}" → "${curLoc.name}"의 별칭`, 'info', 3000);
-                                await _tryEvent(text, curLoc.id, source);
-                                return true;
-                            }
-                        }
-                        // ★ AI 중복 방지: 최근 유저 장소와 같은 곳인지 확인
-                        if (mode === 'ai' && _lastUserNewLoc && (Date.now() - _lastUserNewLoc.timestamp < 60000)) {
-                            dbg(`🔀 AI loc "${metaLoc}" → merge candidate with user loc "${_lastUserNewLoc.loc.name}"`);
-                            ui.showMergeToast(_lastUserNewLoc.loc, metaLoc);
-                            await _tryEvent(text, _lastUserNewLoc.loc.id, source);
-                            return true;
-                        }
-                        const loc = await lm.addLocation(metaLoc);
-                        if (loc) {
-                            if (mode === 'user') _lastUserNewLoc = { loc, timestamp: Date.now() };
-                            await lm.moveTo(loc.id, rpDate);
-                            if (s.showDetectToast) wtNotify(`${wtMascot()} 🆕 ${loc.name}`, 'new', 3500);
-                            pi.inject(); if (ui.panelVisible) ui.refresh();
-                            ui.showAutoToast(loc);
-                            await _tryEvent(text, loc.id, source);
-                            setTimeout(async () => { try { await lm.autoCalcDistances(); await lm.autoReverseGeocode(); pi.inject(); } catch(_){} }, 1500);
-                        }
-                    }
+                    const queued = queueDetectedPlace(metaLoc, {
+                        source: 'meta', kind: 'current', confidence: 0.86,
+                        reason: 'Location/장소 메타 필드에서 찾음',
+                        snippet: text, rpDate,
+                    });
+                    const committed = queued.commitPromise ? await queued.commitPromise : null;
+                    const eventLocId = committed?.id || lm.currentLocationId;
+                    if (eventLocId) await _tryEvent(text, eventLocId, source);
                     return true;
                 }
             }
@@ -482,12 +636,46 @@ async function _legacyScanMessage(text, source = 'USER') {
         // 이미 등록된 장소 감지 (USER/AI 동일)
         const result = det.detect(text);
         if (result) {
-            const { location, type, confidence } = result;
+            const { type, confidence } = result;
+            const contextual = findContextualExactLocation(lm, result.location.name);
+            let location = contextual || result.location;
+
+            // A child found under another parent is not proof that the RP moved
+            // to that parent. Hold it for review under the current context.
+            if (!contextual && result.location.parentId && isStandaloneInternalLabel(result.location.name)) {
+                const parent = resolveTopLevelParent(lm, result.location.name, '', LocationManager.PLACE_DICT);
+                queueDetectedPlace(result.location.name, {
+                    source: mode, kind: 'sub', parentId: parent?.id || '', confidence,
+                    reason: '다른 부모의 동일 내부 장소 — 현재 부모 연결 확인 필요',
+                    snippet: text, rpDate, autoCommit: false,
+                });
+                return true;
+            }
+
+            // Never reuse a legacy world-map Room as a current top-level place.
+            if (!location.parentId && isStandaloneInternalLabel(location.name)) {
+                const parent = resolveTopLevelParent(lm, location.name, '', LocationManager.PLACE_DICT);
+                queueDetectedPlace(location.name, {
+                    source: mode, kind: 'sub', parentId: parent?.id || '', confidence: Math.min(confidence, 0.64),
+                    reason: '구버전 최상위 내부 장소 — 부모 확인 필요',
+                    snippet: text, rpDate, autoCommit: false,
+                });
+                return true;
+            }
+
             dbg(`✅ "${location.name}" (${type} c=${confidence})`);
-            if (lm.currentLocationId !== location.id) {
-                await lm.moveTo(location.id, rpDate);
+            // Only a strong name-adjacent movement expression may mutate current state.
+            if (_dm === 'auto' && confidence >= 0.9) {
+                await moveToDetectedLocation(lm, location, rpDate);
                 if (s.showDetectToast) wtNotify(`${wtMascot()} ${wtTreat()} ${location.name}`, 'move');
                 pi.inject(); if (ui.panelVisible) ui.refresh();
+            } else if (_dm !== 'auto' || confidence < 0.9) {
+                queueDetectedPlace(location.name, {
+                    source: mode, kind: location.parentId ? 'sub' : 'current', parentId: location.parentId || '', confidence,
+                    reason: '기존 장소명이 언급됐지만 이동 표현이 이름 바로 옆에서 확실하지 않음',
+                    snippet: text, rpDate, autoCommit: false,
+                });
+                return true;
             }
             // 이벤트 추출 (AI=전체, USER=강한 키워드만)
             await _tryEvent(text, location.id, source);
@@ -497,77 +685,21 @@ async function _legacyScanMessage(text, source = 'USER') {
         // 새 장소 발견 (mode 전달 → AI는 엄격)
         const np = det.detectNewPlace(text, mode);
         if (np) {
-            // ★ 서브로케이션 체크 (거실, 부엌 등 → 현재 장소의 하위)
-            if (lm.isSubLocation(np) && lm.currentLocationId) {
-                const sub = await lm.findOrCreateSub(lm.currentLocationId, np);
-                await lm.moveToSub(sub.id);
-                const curLoc = lm.locations.find(l => l.id === lm.currentLocationId);
-                dbg(`🏠 Sub-location: "${curLoc?.name} > ${np}"`);
-                if (s.showDetectToast) wtNotify(`🏠 ${curLoc?.name} > ${np}`, 'move', 2500);
-                pi.inject();
-                await _tryEvent(text, sub.id, source); // ★ 이벤트는 서브에 저장!
-                return true;
-            }
             dbg(`🆕 "${np}" (${source})`);
-            if (!lm.currentChatId) await lm.loadChat();
-            if (lm.currentChatId) {
-                // ★ 위치 기반 중복 방지: AI가 현재 위치의 다른 이름을 언급한 경우
-                if (mode === 'ai' && lm.currentLocationId) {
-                    const curLoc = lm.locations.find(l => l.id === lm.currentLocationId);
-                    const lastMove = lm.movements.length ? lm.movements[lm.movements.length - 1] : null;
-                    if (curLoc && lastMove && (Date.now() - lastMove.timestamp < 120000)) {
-                        dbg(`🔀 AI newPlace "${np}" at current "${curLoc.name}" → auto-alias`);
-                        const aliases = [...(curLoc.aliases || []), np];
-                        await lm.updateLocation(curLoc.id, { aliases });
-                        wtNotify(`📎 "${np}" → "${curLoc.name}"의 별칭`, 'info', 3000);
-                        await _tryEvent(text, curLoc.id, source);
-                        return true;
-                    }
-                }
-                // ★ AI 중복 방지: 최근 유저 장소와 같은 곳인지 확인
-                if (mode === 'ai' && _lastUserNewLoc && (Date.now() - _lastUserNewLoc.timestamp < 60000)) {
-                    dbg(`🔀 AI loc "${np}" → merge candidate with user loc "${_lastUserNewLoc.loc.name}"`);
-                    ui.showMergeToast(_lastUserNewLoc.loc, np);
-                    await _tryEvent(text, _lastUserNewLoc.loc.id, source);
-                    return true;
-                }
-                // v0.9.23: 확인 모드면 자동 등록 대신 팝업으로 사용자 확인
-                if (window._wtDetectMode === 'confirm') {
-                    dbg(`🪧 confirm 모드 — 팝업으로 "${np}" 등록 확인 요청`);
-                    ui.showDetectConfirm(np);
-                    return true;
-                }
-                const loc = await lm.addLocation(np);
-                if (loc) {
-                    if (mode === 'user') _lastUserNewLoc = { loc, timestamp: Date.now() };
-                    await lm.moveTo(loc.id, rpDate);
-                    if (s.showDetectToast) wtNotify(`${wtMascot()} 🆕 ${loc.name}`, 'new', 3500);
-                    pi.inject(); if (ui.panelVisible) ui.refresh();
-                    ui.showAutoToast(loc);
-                    await _tryEvent(text, loc.id, source);
-                    setTimeout(async () => {
-                        try {
-                            // v0.9.42: 알려진 도시/국가면 placeOnly 없이 그 이름으로 지오코딩 (도시는 명확 — "뉴욕"/"New York"이 다른 class로 와도 수용)
-                            const cityNm = det.cityInName(np);
-                            let g;
-                            if (cityNm) {
-                                g = await _geocodeQuiet(det.cityGeoQuery(cityNm), true);
-                                if (g && cityNm !== np) dbg(`📍 이름 속 도시로 지오코딩: "${np}" → "${cityNm}"`);
-                            } else {
-                                // 일반 장소 → placeOnly (도시/지역이면 핀 이동, 아니면 현재근처 유지)
-                                g = await _geocodeQuiet(np, true);
-                            }
-                            if (g) {
-                                await lm.updateLocation(loc.id, { lat: g.lat, lng: g.lng, address: g.addr, _geoFixed: true });
-                                dbg(`📍 새 장소 지역 지오코딩: "${np}" → ${g.lat.toFixed(3)},${g.lng.toFixed(3)}`);
-                                if (s.showDetectToast) wtNotify(`📍 ${loc.name} → ${g.addr}`, 'new', 3000);
-                            }
-                            await lm.autoCalcDistances(); await lm.autoReverseGeocode(); pi.inject();
-                            if (ui.panelVisible) ui.refresh();
-                        } catch (_) {}
-                    }, 1500);
-                }
-            }
+            const isInternal = lm.isSubLocation(np);
+            const parent = isInternal ? resolveTopLevelParent(lm, np, '', LocationManager.PLACE_DICT) : null;
+            const queued = queueDetectedPlace(np, {
+                source: mode,
+                kind: isInternal ? 'sub' : 'current', parentId: parent?.id || '',
+                confidence: mode === 'user' ? 0.76 : 0.68,
+                reason: isInternal
+                    ? (parent ? `“${parent.name}” 내부 장소로 감지` : '내부 장소로 보이지만 부모 장소를 확인해야 함')
+                    : '이동 문맥에서 미등록 장소명을 찾음',
+                snippet: text, rpDate, autoCommit: isInternal ? Boolean(parent) : undefined,
+            });
+            const committed = queued.commitPromise ? await queued.commitPromise : null;
+            const eventLocId = committed?.id || lm.currentLocationId;
+            if (eventLocId) await _tryEvent(text, eventLocId, source);
             return true;
         }
 
@@ -589,7 +721,7 @@ async function _legacyScanMessage(text, source = 'USER') {
         // (약속 장소 감지는 메타 Location 처리 전에 이미 실행됨)
 
         return false;
-    } catch(e) { console.error(`[${EXTENSION_NAME}] Scan:`, e); return false; }
+    } catch (_) { return false; }
 }
 
 async function init() {
@@ -597,17 +729,91 @@ async function init() {
     for (const [k,v] of Object.entries(defaults)) {
         if (extension_settings[EXTENSION_NAME][k] === undefined) extension_settings[EXTENSION_NAME][k] = v;
     }
-    extension_settings[EXTENSION_NAME].debugMode = false;
-    // v0.9.0: 자동 감지 폐지 — 기존 유저도 강제 OFF
-    if (!extension_settings[EXTENSION_NAME]._migrated_v090) {
+    // Rebuild the extension settings as a plain redacted object so secrets nested in an
+    // old or imported settings blob cannot survive merely because they are not top-level.
+    extension_settings[EXTENSION_NAME] = redactSecretFields(extension_settings[EXTENSION_NAME]) || { ...defaults };
+    // v0.9.46: credentials must never live in persistent extension settings.
+    // Remove legacy secrets on every startup, even if an old backup reintroduced them.
+    const secretSettingPattern = /^(?:api[_-]?key|private[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|secret|password|vertexSaJson|llmApiKey)$/i;
+    for (const key of Object.keys(extension_settings[EXTENSION_NAME])) {
+        if (secretSettingPattern.test(key)) delete extension_settings[EXTENSION_NAME][key];
+    }
+    delete extension_settings[EXTENSION_NAME].useVertex;
+    if (!extension_settings[EXTENSION_NAME]._securityMigration0946) {
+        extension_settings[EXTENSION_NAME].externalAiEnabled = false;
+        extension_settings[EXTENSION_NAME].shareRpData = false;
+        extension_settings[EXTENSION_NAME].allowAutoGeocoding = false;
+        extension_settings[EXTENSION_NAME].autoEvent = false;
+        extension_settings[EXTENSION_NAME].autoSchedule = false;
+        extension_settings[EXTENSION_NAME].dragEvent = false;
+        extension_settings[EXTENSION_NAME].aiInjection = false;
+        extension_settings[EXTENSION_NAME]._securityMigration0946 = true;
+    }
+    // v0.9.47 changes the detection/storage boundary. Reset every sensitive opt-in once
+    // so an older installation cannot silently carry paid or data-sharing behavior forward.
+    if (!extension_settings[EXTENSION_NAME]._securityMigration0947) {
+        extension_settings[EXTENSION_NAME].externalAiEnabled = false;
+        extension_settings[EXTENSION_NAME].shareRpData = false;
+        extension_settings[EXTENSION_NAME].allowAutoGeocoding = false;
+        extension_settings[EXTENSION_NAME].autoEvent = false;
+        extension_settings[EXTENSION_NAME].autoSchedule = false;
+        extension_settings[EXTENSION_NAME].dragEvent = false;
+        extension_settings[EXTENSION_NAME].aiInjection = false;
+        extension_settings[EXTENSION_NAME].locationEnrichment = 'off';
+        extension_settings[EXTENSION_NAME].detectMode = 'off';
         extension_settings[EXTENSION_NAME].autoDetect = false;
+        extension_settings[EXTENSION_NAME]._securityMigration0947 = true;
+    }
+    // v0.9.49: v0.9.47에서 잘못 강제 해제한 핵심 자동 등록 동작을 한 번 복구한다.
+    // 이 기능은 로컬 규칙 감지이며 외부 AI·Photon 동의 설정은 건드리지 않는다.
+    if (!extension_settings[EXTENSION_NAME]._restoreCoreDetection0949) {
+        extension_settings[EXTENSION_NAME].detectMode = 'auto';
+        extension_settings[EXTENSION_NAME].autoDetect = true;
+        extension_settings[EXTENSION_NAME]._restoreCoreDetection0949 = true;
+    }
+    // v0.9.51: Yun 확정 정책 마이그레이션 (1회)
+    //   자동 감지 기본 OFF(후보함은 유지) / aiInjection·dragEvent 기본 ON 복원 / llmMode 기본 profile
+    if (!extension_settings[EXTENSION_NAME]._policyMigration0951) {
+        extension_settings[EXTENSION_NAME].detectMode = 'off';
+        extension_settings[EXTENSION_NAME].autoDetect = false;
+        extension_settings[EXTENSION_NAME].aiInjection = true;
+        extension_settings[EXTENSION_NAME].dragEvent = true;
+        if (!extension_settings[EXTENSION_NAME].llmMode) extension_settings[EXTENSION_NAME].llmMode = 'profile';
+        extension_settings[EXTENSION_NAME]._policyMigration0951 = true;
+    }
+    // Treat privacy- and billing-sensitive settings as strict booleans on every load.
+    // Corrupt/legacy string values such as "true" must never become implicit opt-ins.
+    for (const key of ['externalAiEnabled', 'shareRpData', 'allowAutoGeocoding', 'showGoogleLinks', 'autoEvent', 'autoSchedule', 'dragEvent', 'aiInjection']) {
+        extension_settings[EXTENSION_NAME][key] = extension_settings[EXTENSION_NAME][key] === true;
+    }
+    if (!['off', 'confirm', 'auto'].includes(extension_settings[EXTENSION_NAME].detectMode)) {
+        extension_settings[EXTENSION_NAME].detectMode = 'off';
+        extension_settings[EXTENSION_NAME].autoDetect = false;
+    }
+    // v0.9.51: grounding은 direct 모드 + google 프로바이더에서만 유효 (아니면 off로 강등)
+    if (!['off', 'overpass', 'grounding'].includes(extension_settings[EXTENSION_NAME].locationEnrichment)) {
+        extension_settings[EXTENSION_NAME].locationEnrichment = 'off';
+    }
+    if (extension_settings[EXTENSION_NAME].locationEnrichment === 'grounding'
+        && (extension_settings[EXTENSION_NAME].llmMode !== 'direct' || extension_settings[EXTENSION_NAME].llmProvider !== 'google')) {
+        extension_settings[EXTENSION_NAME].locationEnrichment = 'off';
+    }
+    if (!['profile', 'direct'].includes(extension_settings[EXTENSION_NAME].llmMode)) {
+        extension_settings[EXTENSION_NAME].llmMode = 'profile';
+    }
+    if (!['liberty', 'bright', 'dark'].includes(extension_settings[EXTENSION_NAME].openMapStyle)) {
+        extension_settings[EXTENSION_NAME].openMapStyle = 'liberty';
+    }
+    extension_settings[EXTENSION_NAME].mapSearchLanguage = extension_settings[EXTENSION_NAME].mapSearchLanguage === 'en' ? 'en' : 'ko';
+    extension_settings[EXTENSION_NAME].debugMode = false;
+    // 구버전 마이그레이션 표식은 유지하되 v0.9.49 복구값을 다시 덮지 않는다.
+    if (!extension_settings[EXTENSION_NAME]._migrated_v090) {
         extension_settings[EXTENSION_NAME]._migrated_v090 = true;
     }
     // ★ v0.6.0 마이그레이션: 기존 'node' 유저 → 'leaflet' 강제 전환 (한 번만)
     if (!extension_settings[EXTENSION_NAME]._migrated_v06) {
         if (extension_settings[EXTENSION_NAME].mapMode === 'node') {
             extension_settings[EXTENSION_NAME].mapMode = 'leaflet';
-            console.log(`[${EXTENSION_NAME}] 🎉 v0.6.0 migration: mapMode node → leaflet`);
         }
         extension_settings[EXTENSION_NAME]._migrated_v06 = true;
     }
@@ -618,6 +824,8 @@ async function init() {
     det = new LocationDetector(lm);
     pi = new PromptInjector(lm);
     ui = new UIManager(lm, pi);
+    detectionCandidates = new DetectionCandidateManager(lm);
+    ui.setDetectionCandidates(detectionCandidates);
     ui.createSettingsPanel(); ui.createSidePanel(); ui.registerWandButton();
 
     let lastId = null;
@@ -625,13 +833,11 @@ async function init() {
     async function handle(idx) {
         try {
             if (isAutoDetectPaused()) {
-                console.log(`[${EXTENSION_NAME}] ⏸️ handle skipped: auto-detect paused`);
                 return;
             }
             _handleCount++;
-            console.log(`[${EXTENSION_NAME}] 🔔 handle(${typeof idx === 'number' ? idx : 'event'}) #${_handleCount}`);
-            if (!isChatActive()) { console.log(`[${EXTENSION_NAME}] ⏭️ chatActive=false`); return; }
-            const ctx = getContext(); if (!ctx?.chat?.length) { console.log(`[${EXTENSION_NAME}] ⏭️ no chat`); return; }
+            if (!isChatActive()) return;
+            const ctx = getContext(); if (!ctx?.chat?.length) return;
 
             // 메시지 가져오기 (idx가 숫자면 해당 인덱스, 아니면 마지막 메시지)
             let aiMsg = null, aiIdx = -1;
@@ -643,7 +849,7 @@ async function init() {
                     if (ctx.chat[i] && !ctx.chat[i].is_user) { aiMsg = ctx.chat[i]; aiIdx = i; break; }
                 }
             }
-            if (!aiMsg || aiMsg.is_user) { console.log(`[${EXTENSION_NAME}] ⏭️ no AI msg`); return; }
+            if (!aiMsg || aiMsg.is_user) return;
 
             const mid = `${aiIdx}_${(aiMsg.mes||'').length}`;
             if (mid === lastId) return; lastId = mid;
@@ -664,7 +870,7 @@ async function init() {
             const _schedText = [userMsg?.mes, aiMsg?.mes].filter(t => t && t.trim()).join('\n---\n');
             if (_schedText.trim()) await scanSchedule(_schedText, 'BOTH');
             _userContext = '';
-        } catch(e) { console.error(`[${EXTENSION_NAME}] Handle:`, e); }
+        } catch (_) {}
     }
 
     // ★ 이벤트 등록 (여러 이벤트에 걸어서 확실하게)
@@ -672,7 +878,6 @@ async function init() {
     for (const evName of msgEvents) {
         if (event_types[evName]) {
             eventSource.on(event_types[evName], handle);
-            console.log(`[${EXTENSION_NAME}] ✅ ${evName} 등록`);
         }
     }
 
@@ -691,6 +896,7 @@ async function init() {
         const newId = lm.getChatId();
         dbg(`🔄 CHAT_CHANGED → ${newId}`);
         await lm.loadChat();
+        detectionCandidates.clear();
         await _ensureTempPinned(); // 좌표 없는 임시/예정 장소 핀 보정
         pi.inject();
         ui.resetMap();
@@ -752,22 +958,14 @@ async function init() {
                         if (place.length >= 2) {
                             dbg(`🏠 Character sheet region detected: "${place}"`);
                             // 이미 같은 이름의 장소 있으면 스킵
-                            if (lm.findByName(place)) {
+                            if (lm.findByNameExact(place)) {
                                 dbg(`🏠 "${place}" already exists, skipping`);
                                 break;
                             }
-                            const loc = await lm.addLocation(place);
-                            if (loc) {
-                                loc.memo = '캐릭터시트에서 감지된 지역';
-                                await lm.updateLocation(loc.id, { memo: loc.memo });
-                                // 첫 장소이거나 현재 위치 없으면 여기로 이동
-                                if (!lm.currentLocationId) await lm.moveTo(loc.id);
-                                pi.inject();
-                                if (ui.panelVisible) ui.refresh();
-                                wtNotify(`🏠 캐릭터 시트에서 "${place}" 감지!`, 'new', 4000);
-                                // ★ Nominatim 직접 호출로 GPS 좌표 설정
-                                _geocodePlace(loc.id, place);
-                            }
+                            queueDetectedPlace(place, {
+                                source: 'character', kind: 'mentioned', confidence: 0.66,
+                                reason: '캐릭터 설명/시나리오에서 지역 후보를 찾음',
+                            });
                             break;
                         }
                     }
@@ -778,11 +976,10 @@ async function init() {
 
     if (event_types.MESSAGE_SENDING) {
         eventSource.on(event_types.MESSAGE_SENDING, () => {
-            if (extension_settings[EXTENSION_NAME]?.enabled && extension_settings[EXTENSION_NAME]?.aiInjection) pi.inject();
+            if (extension_settings[EXTENSION_NAME]?.enabled && extension_settings[EXTENSION_NAME]?.aiInjection === true) pi.inject();
         });
     }
 
-    console.log(`[${EXTENSION_NAME}] Ready! 🐶`);
 
     // 초기 데이터 로드 + 렌더링
     await lm.loadChat();
@@ -830,18 +1027,34 @@ async function scanContext() {
             const desc = det.detectFromDescription(text);
             if (desc) {
                 dbg(`📋 Desc: "${desc}"`);
-                const loc = await lm.addLocation(desc);
-                if (loc) { await lm.moveTo(loc.id); pi.inject(); if (ui.panelVisible) ui.refresh(); }
+                queueDetectedPlace(desc, {
+                    source: 'history', kind: 'mentioned', confidence: 0.62,
+                    reason: '과거 채팅/캐릭터 설명에서 찾은 초기 장소 후보',
+                });
                 return;
             }
         }
         for (const text of sources) {
             const result = det.detect(text);
-            if (result) { dbg(`📋 Context: "${result.location.name}"`); await lm.moveTo(result.location.id); pi.inject(); if (ui.panelVisible) ui.refresh(); return; }
+            if (result) {
+                dbg(`📋 Context: "${result.location.name}"`);
+                queueDetectedPlace(result.location.name, {
+                    source: 'character', kind: 'mentioned', confidence: result.confidence,
+                    reason: '캐릭터 설명/시나리오에서 기존 장소가 언급됨 — 현재 위치 변경 전 확인', snippet: text,
+                });
+                return;
+            }
             const np = det.detectNewPlace(text, 'user');
-            if (np) { dbg(`📋 Context new: "${np}"`); const loc = await lm.addLocation(np); if (loc) { await lm.moveTo(loc.id); pi.inject(); if (ui.panelVisible) ui.refresh(); } return; }
+            if (np) {
+                dbg(`📋 Context new: "${np}"`);
+                queueDetectedPlace(np, {
+                    source: 'history', kind: 'mentioned', confidence: 0.6,
+                    reason: '과거 채팅에서 찾은 초기 장소 후보', snippet: text,
+                });
+                return;
+            }
         }
-    } catch(e) { console.error(`[${EXTENSION_NAME}] Context scan:`, e); }
+    } catch (_) {}
 }
 
 // ========== 최근 메시지 스캔 (승인 플로우) ==========
@@ -850,138 +1063,46 @@ async function scanChatHistory(ctx) {
     const recent = ctx.chat.slice(-4); // 최근 4개
     dbg(`📜 최근 ${recent.length}개 메시지 스캔`);
 
-    const candidates = [];
+    let foundCount = 0;
     for (const msg of recent) {
         if (!msg?.mes?.trim()) continue;
         const text = msg.mes;
 
         const result = det.detect(text);
-        if (result && !candidates.some(c => c.name === result.location.name)) {
-            candidates.push({ name: result.location.name, existing: true, locId: result.location.id, checked: true });
+        if (result) {
+            const queued = queueDetectedPlace(result.location.name, {
+                source: 'history', kind: 'mentioned', confidence: result.confidence,
+                reason: '최근 채팅에서 기존 장소가 언급됨 — 현재 위치 변경 전 확인', snippet: text,
+            });
+            if (queued.queued) foundCount++;
             continue;
         }
 
         const np = det.detectNewPlace(text, 'ai');
-        if (np && !lm.findByName(np) && !candidates.some(c => c.name === np)) {
-            candidates.push({ name: np, existing: false, checked: true });
+        if (np && !lm.findByNameExact(np)) {
+            const queued = queueDetectedPlace(np, {
+                source: 'history', kind: 'mentioned', confidence: 0.58,
+                reason: '최근 채팅에서 찾은 미등록 장소 후보', snippet: text,
+            });
+            if (queued.queued) foundCount++;
         }
     }
 
-    if (!candidates.length) return false;
-
-    // 승인 UI 표시
-    dbg(`📜 ${candidates.length}개 장소 감지 → 승인 대기`);
-    ui.showScanApproval(candidates);
+    if (!foundCount) return false;
+    dbg(`📜 ${foundCount}개 장소 후보 → 후보함 대기`);
     return true;
 }
 
-jQuery(async () => { try { await init(); } catch(e) { console.error(`[${EXTENSION_NAME}] Init:`, e); } });
+jQuery(async () => { try { await init(); } catch (_) {} });
 
-// ========== 자동 지오코딩 (캐릭터시트/약속 장소용) ==========
-// v0.9.32: 조용한 지오코딩 — 좌표만 반환, 실패해도 토스트 없음. HTTP/네트워크 실패 시 1회 재시도
-// v0.9.34: placeOnly=true면 도시·지역·국가(class place/boundary)만 — 임의 POI 오매칭 방지
-async function _geocodeQuiet(query, placeOnly = false, retry = 0) {
-    try {
-        const lim = placeOnly ? 5 : 1;
-        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=${lim}&accept-language=ko`;
-        const res = await fetch(url, { headers: { 'User-Agent': 'RP-World-Tracker/0.4' } });
-        if (!res.ok) {
-            if (retry < 1) { await new Promise(r => setTimeout(r, 1200)); return _geocodeQuiet(query, placeOnly, retry + 1); }
-            return null;
-        }
-        const data = await res.json();
-        if (!Array.isArray(data) || !data.length) return null;
-        let r0 = data[0];
-        if (placeOnly) {
-            // v0.9.43: 여러 결과 중 도시/지역/국가(class place·boundary)를 골라냄 — 엉뚱한 POI 방지
-            const cityR = data.find(d => ['place', 'boundary'].includes(d.class));
-            if (!cityR) return null;
-            r0 = cityR;
-        }
-        return {
-            lat: parseFloat(r0.lat),
-            lng: parseFloat(r0.lon),
-            addr: (r0.display_name || '').split(',').slice(0, 3).join(',') || query
-        };
-    } catch (_) {
-        if (retry < 1) { await new Promise(r => setTimeout(r, 1200)); return _geocodeQuiet(query, placeOnly, retry + 1); }
-        return null;
-    }
-}
-
-// v0.9.45: 도시명이면 그 도시로 지오코딩해서 좌표 보정 (confirm 팝업 등록 등 외부에서 호출)
-async function _geoFixCity(locId, name) {
-    try {
-        const cityNm = det.cityInName(name);
-        if (!cityNm) return;
-        const g = await _geocodeQuiet(det.cityGeoQuery(cityNm), true);
-        if (g) {
-            await lm.updateLocation(locId, { lat: g.lat, lng: g.lng, address: g.addr, _geoFixed: true });
-            dbg(`📍 confirm 등록 도시 지오코딩: "${name}" → "${cityNm}"`);
-            if (ui.panelVisible) ui.refresh();
-        }
-    } catch (_) {}
-}
-if (typeof window !== 'undefined') window._wtGeoFixCity = _geoFixCity;
-
-async function _geocodePlace(locId, placeName, retry = 0) {
-    dbg(`🌐 Geocoding attempt ${retry + 1}: "${placeName}" (locId=${locId})`);
-    try {
-        const geoUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(placeName)}&limit=1&accept-language=ko`;
-        dbg(`🌐 Fetching: ${geoUrl}`);
-        const geoRes = await fetch(geoUrl, { headers: { 'User-Agent': 'RP-World-Tracker/0.4' } });
-        dbg(`🌐 Response: ${geoRes.status} ${geoRes.statusText}`);
-
-        if (!geoRes.ok) {
-            dbg(`⚠️ Nominatim HTTP error: ${geoRes.status}`);
-            if (retry < 2) { setTimeout(() => _geocodePlace(locId, placeName, retry + 1), 3000); return; }
-            wtNotify(`⚠️ 주소 검색 실패 (${geoRes.status}) — 수동으로 설정해주세요`, 'warn', 5000);
-            return;
-        }
-
-        const geoData = await geoRes.json();
-        dbg(`🌐 Results: ${geoData.length}개`);
-
-        if (!geoData.length) {
-            dbg(`⚠️ Nominatim: no results for "${placeName}"`);
-            if (retry < 2) { setTimeout(() => _geocodePlace(locId, placeName, retry + 1), 3000); return; }
-            wtNotify(`⚠️ "${placeName}" 주소를 찾지 못했어요 — 수동으로 설정해주세요`, 'warn', 5000);
-            return;
-        }
-
-        const lat = parseFloat(geoData[0].lat);
-        const lng = parseFloat(geoData[0].lon);
-        const addr = geoData[0].display_name?.split(',').slice(0, 3).join(',') || placeName;
-
-        await lm.updateLocation(locId, { lat, lng, address: addr });
-        dbg(`🏠 ✅ Anchor set: "${placeName}" → ${lat.toFixed(4)},${lng.toFixed(4)} (${addr})`);
-        wtNotify(`📍 ${placeName} → ${addr}`, 'new', 3000);
-
-        // 기존 좌표 없는 장소들도 이 앵커 주변에 자동 배치
-        const others = lm.locations.filter(l => l.id !== locId && !l.lat && !l.lng);
-        if (others.length > 0) {
-            const angleStep = (2 * Math.PI) / others.length;
-            for (let i = 0; i < others.length; i++) {
-                const dist = 30 + Math.random() * 120;
-                const angle = angleStep * i + (Math.random() * 0.3);
-                const oLat = lat + (dist / 111320) * Math.cos(angle);
-                const oLng = lng + (dist / (111320 * Math.cos(lat * Math.PI / 180))) * Math.sin(angle);
-                await lm.updateLocation(others[i].id, { lat: oLat, lng: oLng });
-            }
-            dbg(`🏠 Auto-placed ${others.length} locations around "${placeName}"`);
-        }
-        pi.inject();
-        if (ui?.panelVisible) ui.refresh();
-    } catch(e) {
-        dbg(`⚠️ Geocode error (attempt ${retry + 1}): ${e.message}`);
-        console.error(`[${EXTENSION_NAME}] Geocode:`, e);
-        if (retry < 2) {
-            dbg(`🔄 Retrying in 3s...`);
-            setTimeout(() => _geocodePlace(locId, placeName, retry + 1), 3000);
-        } else {
-            wtNotify(`⚠️ "${placeName}" 주소 자동 설정 실패 — 수동으로 설정해주세요`, 'warn', 5000);
-        }
-    }
+// ========== opt-in automatic geocoding (Photon / OpenStreetMap) ==========
+// Chat-derived names are never transmitted unless allowAutoGeocoding is explicitly enabled.
+async function _geocodeQuiet(query, placeOnly = false, bias = null) {
+    const results = await searchPlaces(query, { limit: placeOnly ? 5 : 1, automatic: true, bias: bias || undefined });
+    const best = placeOnly
+        ? results.find(result => /city|town|village|state|country|district|locality/i.test(`${result.type} ${result.category}`)) || results[0]
+        : results[0];
+    return best ? { lat: best.lat, lng: best.lng, addr: best.fullName || best.name || String(query) } : null;
 }
 
 // ========== RP 날짜 추출 (메타데이터에서) ==========
@@ -1151,12 +1272,10 @@ function _hasScheduleSignal(text) {
 // v0.9.37: 이름에 도시가 있으면 그 도시로 재지오코딩 (집 근처 오배치 교정). _geoFixed로 1회만.
 async function _ensureTempPinned() {
     try {
-        if (!lm.currentChatId) return;
-        const anchor = lm.locations.find(l => l.lat != null && l.lng != null);
-        const base = anchor ? { lat: anchor.lat, lng: anchor.lng } : { lat: 37.5665, lng: 126.9780 };
+        if (!lm.currentChatId || extension_settings[EXTENSION_NAME]?.allowAutoGeocoding !== true) return;
         let changed = 0;
         for (const l of lm.locations) {
-            if (l.parentId || l._geoFixed) continue;
+            if (l.parentId || l._geoFixed || l._geocodeSuppressed) continue;
             const isTemp = (Array.isArray(l.tags) && l.tags.includes('wantToGo')) || l._tempAddress;
             if (!isTemp) continue;
             const cityNm = det.cityInName(l.name);
@@ -1164,23 +1283,14 @@ async function _ensureTempPinned() {
                 // 이름에 도시/국가 → 그 위치로 지오코딩 (집 근처 오배치 교정)
                 const g = await _geocodeQuiet(det.cityGeoQuery(cityNm), true);
                 if (g) {
-                    await lm.updateLocation(l.id, { lat: g.lat, lng: g.lng, address: g.addr, _geoFixed: true });
+                    await lm.updateLocation(l.id, { lat: g.lat, lng: g.lng, address: g.addr, _geoFixed: true, _approximateCoordinates: false, _approximateAnchorId: null, _tempAddress: false });
                     changed++;
                     await new Promise(r => setTimeout(r, 1100)); // rate-limit 완화
                     continue;
                 }
                 // 지오코딩 실패 → _geoFixed 안 박음 (다음 로드에 재시도)
             }
-            // 도시 없음 & 좌표 없음 → 앵커 근처 배치
-            if (l.lat == null || l.lng == null) {
-                const dist = 80 + Math.random() * 220, ang = Math.random() * 2 * Math.PI;
-                await lm.updateLocation(l.id, {
-                    lat: base.lat + (dist / 111320) * Math.cos(ang),
-                    lng: base.lng + (dist / (111320 * Math.cos(base.lat * Math.PI / 180))) * Math.sin(ang),
-                    _geoFixed: true
-                });
-                changed++;
-            }
+            // No fabricated fallback coordinate. Unresolved places stay off the real map.
         }
         if (changed) { dbg(`📍 임시 장소 핀 보정: ${changed}곳`); if (ui.panelVisible) ui.refresh(); }
     } catch (_) {}
@@ -1189,10 +1299,12 @@ async function _ensureTempPinned() {
 async function scanSchedule(text, source) {
     try {
         const s = extension_settings[EXTENSION_NAME];
-        if (!s?.enabled || !s?.autoSchedule || !text?.trim()) return;
+        if (!s?.enabled || s?.autoSchedule !== true || !text?.trim()) return;
+        const narrativeText = stripNonNarrativeMetadata(text);
+        if (!narrativeText) return;
         if (isAutoDetectPaused()) return;
-        if (!_hasScheduleSignal(text)) return;
-        if (Date.now() - _lastSchedTime < 8000) return; // 짧은 시간 중복 방지
+        if (!_hasScheduleSignal(narrativeText)) return;
+        if (Date.now() - _lastSchedTime < 30000) return; // 반복 과금/중복 방지
         if (!lm.currentChatId) await lm.loadChat();
         if (!lm.currentChatId) return;
         let rpDate = ''; try { rpDate = window._wtGetRpDate?.() || ''; } catch (_) {}
@@ -1203,14 +1315,14 @@ JSON만 출력 (마크다운/설명 금지): {"hasPlan":true 또는 false,"place
 구체적인 미래 계획이 없으면 {"hasPlan":false} 만 출력.${_curHint}
 
 텍스트:
-"""${text.slice(0, 1500)}"""`;
-        window._wtMaxTokensOverride = 256;
-        window._wtDisableThinking = true;
-        const result = await callLLM(prompt);
-        window._wtMaxTokensOverride = null;
-        window._wtDisableThinking = false;
+"""${narrativeText.slice(0, 1500)}"""`;
+        const result = await callLLM(prompt, { maxTokens: 256 });
         const p = result ? parseLLMJson(result) : null;
         if (!p || !p.hasPlan) return;
+        p.place = plainText(p.place, 80);
+        p.geo = plainText(p.geo, 160);
+        p.what = plainText(p.what || '예정된 일정', 300);
+        p.when = plainText(p.when, 80);
         // v0.9.43: 동사/형용사 활용형 파편 거르기 ("들어"=들어온다, "두꺼운" 등 — 도시도 아니고 짧은 활용형이면 장소 아님)
         if (p.place && typeof p.place === 'string') {
             const _pp = p.place.trim();
@@ -1222,61 +1334,21 @@ JSON만 출력 (마크다운/설명 금지): {"hasPlan":true 또는 false,"place
         _lastSchedTime = Date.now();
         // 장소: place 있으면 find/create, 없으면 현재 위치
         let locId = lm.currentLocationId;
-        let _schedNewLocId = null;
         if (p.place && String(p.place).trim()) {
             const nm = String(p.place).trim();
-            const existing = lm.findByName(nm);
+            const existing = lm.findByNameExact(nm);
             if (existing) locId = existing.id;
             else {
-                const nl = await lm.addLocation(nm);
-                if (nl) {
-                    locId = nl.id;
-                    _schedNewLocId = nl.id;
-                    // 임시 표시 + 사용자가 이름/위치 수정 가능하게
-                    nl.tags = Array.from(new Set([...(nl.tags || []), 'wantToGo']));
-                    nl._tempAddress = true;
-                    if (!nl.memo) nl.memo = '📅 예정 장소 (임시 — 이름/위치 수정 가능)';
-                    await lm.updateLocation(nl.id, { tags: nl.tags, _tempAddress: true, memo: nl.memo });
-                    if (s.showDetectToast) wtNotify(`📍 임시 장소 등록: ${nm} (지도 확인·수정 가능)`, 'new', 4000);
-                }
+                queueDetectedPlace(nm, {
+                    source: 'schedule', kind: 'planned', confidence: 0.72,
+                    reason: '사용자가 켠 AI 일정 추출 결과 — 등록 전 이름·대상 확인 필요',
+                    snippet: [p.when, p.what].filter(Boolean).join(' · '), rpDate,
+                });
             }
         }
         if (!locId) return;
         const loc = lm.locations.find(l => l.id === locId);
         if (!loc) return;
-
-        // v0.9.32: 새 임시 장소 핀 좌표 — 지오코딩(타지역/국가 OK) → 실패 시 현재 근처 강제 배치(핀 보장)
-        if (_schedNewLocId && loc.id === _schedNewLocId) {
-            const geoQ = (p.geo && String(p.geo).trim()) || (p.place && String(p.place).trim()) || '';
-            let placed = false;
-            if (geoQ) {
-                let g = await _geocodeQuiet(geoQ);
-                // v0.9.36: 실패 시 이름 속 도시로 재시도
-                if (!g) {
-                    const cityNm = det.cityInName(geoQ) || det.cityInName(loc.name);
-                    if (cityNm) g = await _geocodeQuiet(det.cityGeoQuery(cityNm), true);
-                }
-                if (g) {
-                    await lm.updateLocation(loc.id, { lat: g.lat, lng: g.lng, address: g.addr, _geoFixed: true });
-                    placed = true;
-                    dbg(`📍 일정 장소 지오코딩: "${geoQ}" → ${g.lat.toFixed(3)},${g.lng.toFixed(3)}`);
-                    if (s.showDetectToast) wtNotify(`📍 ${loc.name} → 지도 표시 (${g.addr})`, 'new', 3500);
-                }
-            }
-            // 지오코딩 실패 & 좌표 없으면 → 현재 위치 → 좌표 있는 아무 장소 → 기본값(서울) 순으로 무조건 배치(핀 보장)
-            if (!placed && (loc.lat == null || loc.lng == null)) {
-                const anchor = lm.locations.find(l => l.id === lm.currentLocationId && l.lat != null && l.lng != null)
-                            || lm.locations.find(l => l.id !== loc.id && l.lat != null && l.lng != null);
-                const base = anchor ? { lat: anchor.lat, lng: anchor.lng } : { lat: 37.5665, lng: 126.9780 };
-                const dist = 80 + Math.random() * 220, ang = Math.random() * 2 * Math.PI;
-                await lm.updateLocation(loc.id, {
-                    lat: base.lat + (dist / 111320) * Math.cos(ang),
-                    lng: base.lng + (dist / (111320 * Math.cos(base.lat * Math.PI / 180))) * Math.sin(ang)
-                });
-                dbg(`📍 일정 장소 폴백 배치: ${loc.name} (anchor=${anchor?.name || '기본값'})`);
-            }
-            if (ui?.panelVisible) ui.refresh();
-        }
 
         if (!loc.events) loc.events = [];
         const what = p.what || '예정된 일정';
@@ -1301,14 +1373,15 @@ JSON만 출력 (마크다운/설명 금지): {"hasPlan":true 또는 false,"place
 
 async function _tryEvent(text, locId, source) {
     const _s = extension_settings[EXTENSION_NAME];
-    if (_s && _s.autoEvent === false) { dbg('⏭️ autoEvent OFF — 이벤트 자동 기록 생략'); return; }
-    dbg(`📋 _tryEvent (${source}) len=${text.length}`);
-    if (text.length < 25) { dbg('⏭️ Text too short'); return; }
+    if (_s?.autoEvent !== true) { dbg('⏭️ autoEvent OFF — 이벤트 자동 기록 생략'); return; }
+    const narrativeText = stripNonNarrativeMetadata(text);
+    dbg(`📋 _tryEvent (${source}) len=${narrativeText.length}`);
+    if (narrativeText.length < 25) { dbg('⏭️ Narrative text too short'); return; }
     // 같은 장소 5초 내 중복 방지 (다른 장소는 OK!)
     if (Date.now() - _lastEventTime < 5000 && _lastEventLocId === locId) { dbg('⏭️ Event cooldown (same loc)'); return; }
     // USER는 강한 키워드만, AI는 전체 트리거
-    if (source === 'USER' && !_strongKw.test(text)) { dbg('⏭️ USER no strong keyword'); return; }
-    if (source === 'AI' && !_triggerKw.test(text)) { dbg('⏭️ AI no trigger keyword'); return; }
+    if (source === 'USER' && !_strongKw.test(narrativeText)) { dbg('⏭️ USER no strong keyword'); return; }
+    if (source === 'AI' && !_triggerKw.test(narrativeText)) { dbg('⏭️ AI no trigger keyword'); return; }
     dbg(`🎯 Event trigger! (${source}) locId=${locId}`);
 
     const loc = lm.locations.find(l => l.id === locId);
@@ -1325,15 +1398,16 @@ async function _tryEvent(text, locId, source) {
     // ★ RP 날짜 추출 (먼저! plans에서도 사용)
     const rpDate = _extractRpDate(text);
 
-    // ★ Phase 2: LLM 요약 시도 (직접 API 호출)
+    // ★ Phase 2: 사용자가 선택한 연결 프로필로 요약 시도
     try {
         const ctx = getContext();
         // HTML 제거 + 메타데이터 제거
-        const clean = text.replace(/<[^>]*>/g, '').replace(/```[\s\S]*?```/g, '').replace(/<memo>[\s\S]*?<\/memo>/g, '').trim();
+        const clean = narrativeText.replace(/<[^>]*>/g, '').replace(/```[\s\S]*?```/g, '').replace(/<memo>[\s\S]*?<\/memo>/g, '').trim();
         if (clean.length < 30) return;
 
         const trimmed = clean.length > 2000 ? clean.substring(0, 2000) : clean;
-        const userCtx = _userContext ? `\n\n[User's action]: ${_userContext.replace(/<[^>]*>/g, '').substring(0, 300)}` : '';
+        const cleanUserContext = stripNonNarrativeMetadata(_userContext).replace(/<[^>]*>/g, '').substring(0, 300);
+        const userCtx = cleanUserContext ? `\n\n[User's action]: ${cleanUserContext}` : '';
         const userName = ctx.name1 || 'User';
         const charName = ctx.name2 || 'Character';
         // ★ 캐릭터 맥락 (이벤트 요약 품질 향상)
@@ -1389,32 +1463,27 @@ ${recentChat ? `\n[Recent conversation for tone & context]:\n${recentChat}\n` : 
 [Current scene to summarize]:
 ${trimmed}${userCtx}`;
 
-        const result = await callLLM(prompt);
+        const result = await callLLM(prompt, { maxTokens: 2048 });
         if (result) {
             const parsed = parseLLMJson(result);
             if (parsed?.mood && parsed?.summary) {
-                evText = parsed.summary;
-                evTitle = parsed.title || parsed.summary.substring(0, 15) + '...';
-                evMood = parsed.mood;
+                evText = plainText(parsed.summary, 1500);
+                evTitle = plainText(parsed.title || evText.substring(0, 15) + '...', 50);
+                evMood = firstGrapheme(parsed.mood, '📝');
+                const promisePlace = plainText(parsed.promisePlace, 60);
+                parsed.promisePlace = promisePlace || null;
                 dbg(`🤖 LLM Event: "${evTitle}" | "${evText}" (${evMood})`);
                 dbg(`🗓️ LLM future_plan: ${JSON.stringify(parsed.future_plan || 'not present')}, promisePlace: ${parsed.promisePlace || 'null'}`);
                 // ★ 약속 장소 자동 등록 (LLM이 이벤트에서 장소 추출 — 모든 무드)
-                if (parsed.promisePlace && parsed.promisePlace !== 'null' && parsed.promisePlace.toLowerCase() !== 'null') {
+                if (promisePlace && promisePlace.toLowerCase() !== 'null') {
                     try {
-                        const pPlace = parsed.promisePlace.trim();
-                        if (pPlace.length >= 2 && pPlace.length <= 25 && !lm.findByName(pPlace)) {
-                            const newLoc = await lm.addLocation(pPlace);
-                            if (newLoc) {
-                                newLoc.tags = ['wantToGo'];
-                                newLoc._tempAddress = true; // ★ 임시 주소 표시
-                                newLoc.memo = '📅 약속 장소 (주소 미확정)';
-                                if (!newLoc.events) newLoc.events = [];
-                                newLoc.events.push({ text: `📅 "${evTitle}" — 여기서 만나기로 약속`, title: '약속 장소', mood: '📅', timestamp: Date.now(), source: 'auto' });
-                                await lm.updateLocation(newLoc.id, { tags: newLoc.tags, events: newLoc.events, _tempAddress: true, memo: newLoc.memo });
-                                dbg(`📅 Promise place registered: "${pPlace}" (temp address)`);
-                                if (extension_settings[EXTENSION_NAME]?.showDetectToast) wtNotify(`📅 약속 장소: ${pPlace} (주소 미확정)`, 'new', 3500);
-                                pi.inject(); if (ui?.panelVisible) ui.refresh();
-                            }
+                        const pPlace = promisePlace;
+                        if (pPlace.length >= 2 && pPlace.length <= 25 && !lm.findByNameExact(pPlace)) {
+                            queueDetectedPlace(pPlace, {
+                                source: 'event-ai', kind: 'planned', confidence: 0.7,
+                                reason: '사용자가 켠 AI 이벤트 추출의 약속 장소 — 모델 출력 확인 필요',
+                                snippet: evTitle, rpDate,
+                            });
                         }
                     } catch(e) { dbg('⚠️ Promise place from LLM error:', e.message); }
                 }
@@ -1422,38 +1491,39 @@ ${trimmed}${userCtx}`;
                 const fp = parsed.future_plan;
                 if (fp?.has_plan && fp.what) {
                     // ★ where가 null이면 promisePlace를 대신 사용!
-                    const rawWhere = fp.where && fp.where !== 'null' ? fp.where.trim() : null;
-                    const pp = parsed.promisePlace && parsed.promisePlace !== 'null' ? parsed.promisePlace.trim() : null;
+                    const safeWhat = plainText(fp.what, 300);
+                    const safeWhere = plainText(fp.where, 60);
+                    const safeWhen = plainText(fp.when, 80);
+                    const rawWhere = safeWhere && safeWhere.toLowerCase() !== 'null' ? safeWhere : null;
+                    const pp = promisePlace && promisePlace.toLowerCase() !== 'null' ? promisePlace : null;
                     const planWhere = rawWhere || pp;
-                    const planWhen = fp.when && fp.when !== 'null' ? fp.when.trim() : '';
+                    const planWhen = safeWhen && safeWhen.toLowerCase() !== 'null' ? safeWhen : '';
+                    if (!safeWhat) return;
                     let targetLocId = locId;
                     if (planWhere) {
-                        let targetLoc = lm.findByName(planWhere);
+                        let targetLoc = lm.findByNameExact(planWhere);
                         if (!targetLoc && planWhere.length >= 2 && planWhere.length <= 25) {
-                            targetLoc = await lm.addLocation(planWhere);
-                            if (targetLoc) {
-                                targetLoc.tags = ['wantToGo'];
-                                targetLoc._tempAddress = true;
-                                targetLoc.memo = '📅 약속 장소 (주소 미확정)';
-                                await lm.updateLocation(targetLoc.id, { tags: targetLoc.tags, _tempAddress: true, memo: targetLoc.memo });
-                                if (extension_settings[EXTENSION_NAME]?.showDetectToast) wtNotify(`🗓️ 일정: ${fp.what}`, 'new', 3500);
-                            }
+                            queueDetectedPlace(planWhere, {
+                                source: 'event-ai', kind: 'planned', confidence: 0.7,
+                                reason: 'AI가 일정 목적지로 제안 — 등록 전 확인 필요',
+                                snippet: [planWhen, safeWhat].filter(Boolean).join(' · '), rpDate,
+                            });
                         }
                         if (targetLoc) targetLocId = targetLoc.id;
                     }
                     const tLoc = lm.locations.find(l => l.id === targetLocId);
                     if (tLoc) {
                         if (!tLoc.events) tLoc.events = [];
-                        const isDup = tLoc.events.some(e => e.isPlan && e.text === fp.what);
+                        const isDup = tLoc.events.some(e => e.isPlan && e.text === safeWhat);
                         if (!isDup) {
                             const planDate = _calcPlanDate(rpDate, planWhen);
                             tLoc.events.push({
-                                text: fp.what, title: fp.what.substring(0, 20),
+                                text: safeWhat, title: safeWhat.substring(0, 20),
                                 mood: '🗓️', isPlan: true, planWhen: planWhen, planDate,
                                 timestamp: Date.now(), rpDate, source: 'auto'
                             });
                             await lm.updateLocation(targetLocId, { events: tLoc.events });
-                            dbg(`🗓️ Future plan: "${fp.what}" when="${planWhen}" date="${planDate}" where="${planWhere || 'current'}"`)
+                            dbg(`🗓️ Future plan saved`)
                         }
                     }
                     pi.inject(); if (ui?.panelVisible) ui.refresh();
@@ -1462,15 +1532,18 @@ ${trimmed}${userCtx}`;
                 else if (Array.isArray(parsed.plans) && parsed.plans.length > 0) {
                     for (const plan of parsed.plans) {
                         if (!plan.what) continue;
-                        const planWhen = plan.when && plan.when !== 'null' ? plan.when.trim() : '';
+                        const planWhat = plainText(plan.what, 300);
+                        const rawPlanWhen = plainText(plan.when, 80);
+                        const planWhen = rawPlanWhen && rawPlanWhen.toLowerCase() !== 'null' ? rawPlanWhen : '';
+                        if (!planWhat) continue;
                         const tLoc = lm.locations.find(l => l.id === locId);
                         if (tLoc) {
                             if (!tLoc.events) tLoc.events = [];
-                            const isDup = tLoc.events.some(e => e.isPlan && e.text === plan.what);
+                            const isDup = tLoc.events.some(e => e.isPlan && e.text === planWhat);
                             if (!isDup) {
                                 const planDate = _calcPlanDate(rpDate, planWhen);
                                 tLoc.events.push({
-                                    text: plan.what, title: plan.what.substring(0, 20),
+                                    text: planWhat, title: planWhat.substring(0, 20),
                                     mood: '🗓️', isPlan: true, planWhen: planWhen, planDate,
                                     timestamp: Date.now(), rpDate, source: 'auto'
                                 });
@@ -1483,10 +1556,10 @@ ${trimmed}${userCtx}`;
                 }
                 // ★ promisePlace 잡혔는데 plans 비어있으면 → 자동 plan 생성
                 if (parsed.promisePlace && parsed.promisePlace !== 'null' && parsed.promisePlace.toLowerCase() !== 'null') {
-                    const pp = parsed.promisePlace.trim();
-                    const hasPlansForPlace = Array.isArray(parsed.plans) && parsed.plans.some(p => p.where && p.where.toLowerCase() === pp.toLowerCase());
+                    const pp = promisePlace;
+                    const hasPlansForPlace = Array.isArray(parsed.plans) && parsed.plans.some(p => plainText(p?.where, 60).toLowerCase() === pp.toLowerCase());
                     if (!hasPlansForPlace) {
-                        const ppLoc = lm.findByName(pp);
+                        const ppLoc = lm.findByNameExact(pp);
                         if (ppLoc) {
                             if (!ppLoc.events) ppLoc.events = [];
                             const isDup = ppLoc.events.some(e => e.isPlan && e.text?.includes(pp));
@@ -1506,32 +1579,35 @@ ${trimmed}${userCtx}`;
                 if (Array.isArray(parsed.npc_interactions)) {
                     for (const ni of parsed.npc_interactions) {
                         if (!ni?.name || typeof ni.delta !== 'number') continue;
+                        const npcName = plainText(ni.name, 60);
+                        if (!npcName) continue;
                         const delta = Math.max(-1, Math.min(1, ni.delta));
-                        await lm.updateNpcAffinity(locId, ni.name, delta);
-                        dbg(`💗 NPC interaction: "${ni.name}" ${delta > 0 ? '+' : ''}${delta} (${ni.reason || ''})`);
+                        await lm.updateNpcAffinity(locId, npcName, delta);
                     }
                     if (ui?.panelVisible) ui.refresh();
                 }
                 // ★ 💬 커뮤니티 실시간 피드 자동 업데이트 (v0.6.0 NEW — 양방향 연동!)
                 if (Array.isArray(parsed.community_updates) && parsed.community_updates.length) {
-                    for (const cu of parsed.community_updates) {
+                    for (const cu of parsed.community_updates.slice(0, 3)) {
                         if (!cu?.name || !cu?.text) continue;
+                        const safeName = plainText(cu.name, 60);
+                        const safeText = plainText(cu.text, 800);
+                        if (!safeName || !safeText) continue;
                         // 멘션/해시태그 추출
-                        const mentions = (cu.text.match(/@([A-Za-z가-힣0-9_]+)/g) || []).map(m => m.substring(1));
-                        const hashtags = (cu.text.match(/#([A-Za-z가-힣0-9_]+)/g) || []).map(h => h.substring(1));
+                        const mentions = (safeText.match(/@([A-Za-z가-힣0-9_]+)/g) || []).map(m => m.substring(1));
+                        const hashtags = (safeText.match(/#([A-Za-z가-힣0-9_]+)/g) || []).map(h => h.substring(1));
                         await lm.addCommunityPost(locId, {
-                            name: cu.name,
-                            avatar: cu.avatar || '👤',
-                            type: cu.type || 'npc',
-                            mood: cu.mood || '',
-                            moodLabel: cu.moodLabel || '',
-                            text: cu.text,
+                            name: safeName,
+                            avatar: firstGrapheme(cu.avatar, '👤'),
+                            type: ['npc', 'animal'].includes(cu.type) ? cu.type : 'npc',
+                            mood: plainText(cu.mood, 30),
+                            moodLabel: plainText(cu.moodLabel, 40),
+                            text: safeText,
                             mentions,
                             hashtags,
                             likes: 0,
                             rpDate,
                         });
-                        dbg(`💬 Community post: ${cu.name} — "${cu.text.substring(0, 40)}..."`);
                     }
                     if (ui?.panelVisible) ui.refresh();
                 }
@@ -1543,14 +1619,14 @@ ${trimmed}${userCtx}`;
 
     // ★ 폴백: LLM 실패 시 regex 추출
     if (!evText) {
-        const ev = _extractEventSummary(text, '');
+        const ev = _extractEventSummary(narrativeText, '');
         if (!ev) return;
         evText = ev.text;
         evTitle = ev.text.length > 15 ? ev.text.substring(0, 15) + '...' : ev.text;
         evMood = ev.mood;
         dbg(`📝 Regex Event: "${evTitle}" | "${evText}" (${evMood})`);
         // ★ LLM 실패 시 엄격한 regex로 plans 추출 (시간표현 + 행동동사 동시 필요)
-        const planSentences = text.replace(/<[^>]*>/g, '').replace(/<memo>[\s\S]*?<\/memo>/g, '').split(/[.!?。]+/).filter(s => s.trim().length > 10);
+        const planSentences = narrativeText.replace(/<[^>]*>/g, '').replace(/<memo>[\s\S]*?<\/memo>/g, '').split(/[.!?。]+/).filter(s => s.trim().length > 10);
         const timeRx = /(?:내일|모레|일주일|보름|다음\s*주|다음\s*달|(\d+)\s*(?:주|달|개월|일)\s*(?:뒤|후)|이번\s*주말|tomorrow|next\s+(?:week|month)|in\s+(?:two|three|\d+)\s+(?:weeks?|months?|days?)|come\s+back|T\+\d+|at\s+\d{4}\b|by\s+\d{4}\b|\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm)|오전|오후|저녁|아침)/i;
         const actionRx = /(?:가자|가기로|오자|만나|검진|재검|진료|예약|방문|장보기|이사|옮기|go\s+(?:to|back)|visit|return|come\s+back|check[- ]?up|appointment|see\s+(?:you|the\s+doctor)|move\s+(?:the|our|to)|transfer|pack|wheels\s+up|gear\s+up|이동|출발|떠나)/i;
         let regexPlanAdded = false;
@@ -1579,6 +1655,11 @@ ${trimmed}${userCtx}`;
             }
         }
     }
+
+    evText = plainText(evText, 1500);
+    evTitle = plainText(evTitle || evText.substring(0, 30), 60);
+    evMood = firstGrapheme(evMood, '📝');
+    if (!evText) return;
 
     if (!loc.events) loc.events = [];
 
@@ -1705,7 +1786,7 @@ function _extractPlansRegex(text) {
 // ========== 이벤트 요약 추출 (감정/사건 키워드 + 타입 분류) ==========
 function _extractEventSummary(text, locName) {
     // HTML만 제거 (대사는 유지! RP 감정은 대사 안에 있음)
-    const clean = text.replace(/<[^>]*>/g, '').trim();
+    const clean = stripNonNarrativeMetadata(text).replace(/<[^>]*>/g, '').trim();
     if (clean.length < 20) return null;
 
     // 메타데이터/시스템 텍스트 필터 (이벤트 아님)
@@ -1749,7 +1830,7 @@ function _extractEventSummary(text, locName) {
         for (const p of patterns) {
             if (p.rx.test(trimmed)) {
                 let summary = trimmed;
-                if (summary.length > 60) summary = summary.substring(0, 60) + '...';
+                if (summary.length > 500) summary = summary.substring(0, 500) + '...';
                 return { text: summary, type: p.type, mood: p.mood };
             }
         }

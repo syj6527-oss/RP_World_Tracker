@@ -3,17 +3,20 @@
 import { extension_settings, getContext } from '../../../extensions.js';
 import { setExtensionPrompt } from '../../../../script.js';
 import { EXTENSION_NAME, PROMPT_KEY } from './index.js';
+import { redactOutboundSecrets } from './secret-redaction.js';
+
+const MAX_INJECTION_CHARS = 12000;
 
 function getFn() {
     try {
         // 방법 1: script.js에서 직접 import (최신 SillyTavern)
-        if (typeof setExtensionPrompt === 'function') { console.log(`[${EXTENSION_NAME}] 🔧 getFn: found via import`); return setExtensionPrompt; }
+        if (typeof setExtensionPrompt === 'function') return setExtensionPrompt;
         // 방법 2: getContext()
         const ctx = getContext();
-        if (typeof ctx?.setExtensionPrompt === 'function') { console.log(`[${EXTENSION_NAME}] 🔧 getFn: found via getContext`); return ctx.setExtensionPrompt; }
+        if (typeof ctx?.setExtensionPrompt === 'function') return ctx.setExtensionPrompt;
         // 방법 3: window 전역 (구버전)
-        if (typeof window.setExtensionPrompt === 'function') { console.log(`[${EXTENSION_NAME}] 🔧 getFn: found via window`); return window.setExtensionPrompt; }
-    } catch(e) { console.warn(`[${EXTENSION_NAME}] 🔧 getFn error:`, e.message); }
+        if (typeof window.setExtensionPrompt === 'function') return window.setExtensionPrompt;
+    } catch (_) {}
     return null;
 }
 
@@ -51,29 +54,20 @@ export class PromptInjector {
 
     inject() {
         const t = this.generate(); const fn = getFn();
-        try { window._wtLastInjectedPrompt = t || ''; } catch(_) {}
-        console.log(`[${EXTENSION_NAME}] 🔧 inject(): fn=${!!fn}, text=${t ? t.length + 'c' : 'empty'}`);
         try {
             if (fn) {
                 fn(PROMPT_KEY, t||'', 1, 0);
-                if (t) {
-                    console.log(`[${EXTENSION_NAME}] ✅ Prompt injected (${t.length}c):\n${t}`);
-                    console.log(`[${EXTENSION_NAME}] 🔧 Prompt key: "${PROMPT_KEY}"`);
-                }
-            } else {
-                console.warn(`[${EXTENSION_NAME}] ❌ setExtensionPrompt not found!`);
             }
         }
-        catch(e) { console.warn(`[${EXTENSION_NAME}] inject error:`, e.message); }
+        catch (_) {}
     }
     clear() { const fn=getFn(); try{if(fn)fn(PROMPT_KEY,'',1,0)}catch(_){} }
 
     generate() {
         const s = extension_settings[EXTENSION_NAME];
-        console.log(`[${EXTENSION_NAME}] 🔧 generate(): aiInjection=${s?.aiInjection}, locs=${this.lm.locations.length}, curId=${this.lm.currentLocationId}`);
-        if (!s?.aiInjection || !this.lm.locations.length) return '';
+        if (s?.aiInjection !== true || !this.lm.locations.length) return '';
         const cur = this.lm.locations.find(l => l.id === this.lm.currentLocationId);
-        if (!cur) { console.log(`[${EXTENSION_NAME}] 🔧 generate(): cur not found for id=${this.lm.currentLocationId}`); return ''; }
+        if (!cur) return '';
 
         const L = ['[🐾 Paw Map]'];
         L.push('⚙️ Use this location data to maintain spatial consistency and reference past events naturally in your narration.');
@@ -152,9 +146,6 @@ export class PromptInjector {
                 return `${p.name}${action}: "${cleanText}"`;
             }).join('\n  ');
             L.push(`🗣️ Local buzz about this place (recent rumors/atmosphere — weave into the scene's background, not as something the character literally read):\n  ${liveStatus}`);
-            console.log(`[${EXTENSION_NAME}] 🗣️ Local buzz 주입 ${recent.length}개 (community 핀 없음 → 자동 분위기)`);
-        } else if (_commPins.length) {
-            console.log(`[${EXTENSION_NAME}] 🗣️ Local buzz 생략 — 핀한 community ${_commPins.length}개만 반영`);
         }
 
         // 9. 마지막 이동
@@ -210,13 +201,17 @@ export class PromptInjector {
                 pinLines.push(`[${tag}${here ? '' : ' @' + loc.name}] ${p.who || '?'}: "${t}"`);
             });
         }
-        console.log(`[${EXTENSION_NAME}] 📌 pinned items injected: ${pinLines.length}`, pinLines);
         if (pinLines.length) {
             L.push(`📌 User-pinned — reflect these in your next response (weave naturally into the scene):\n  ${pinLines.slice(0, 16).join('\n  ')}`);
         }
 
         L.push('[/Paw Map]');
-        return L.join('\n');
+        // This prompt goes to the normal chat provider rather than callLLM(), so
+        // apply the same last-mile secret masking here as well.
+        const prompt = redactOutboundSecrets(L.join('\n'));
+        if (prompt.length <= MAX_INJECTION_CHARS) return prompt;
+        const suffix = '\n[Map context truncated to limit input-token growth]\n[/Paw Map]';
+        return prompt.slice(0, MAX_INJECTION_CHARS - suffix.length) + suffix;
     }
 
     _mem(loc) {
@@ -235,7 +230,7 @@ export class PromptInjector {
         const recent = evs.slice(-5);
         return recent.map(ev => {
             const mood = ev.mood || '📝';
-            let text = ev.text || ev.title || '';
+            let text = String(ev.text || ev.title || '').slice(0, 600);
             let dateStr = '';
             if (ev.rpDate) {
                 dateStr = ` [${ev.rpDate}]`;
@@ -271,7 +266,7 @@ export class PromptInjector {
 
     _near(cur) {
         const n=[];
-        for(const d of this.lm.distances||[]){
+        for(const d of (this.lm.distances||[]).filter(distance => distance._manual === true)){
             let o=d.fromId===cur.id?d.toId:d.toId===cur.id?d.fromId:null;
             if(!o)continue; const loc=this.lm.locations.find(l=>l.id===o);
             if(!loc) continue;
