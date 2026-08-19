@@ -4,7 +4,7 @@
 import { getContext, extension_settings } from '../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../script.js';
 import { EXTENSION_NAME, wtNotify, toastWarn, toastSuccess, loadLeaflet, wtMascot, wtTreat, runWithoutAutoDetect, isStBusy, makeChatGuard, getCurrentRpDate } from './index.js';
-import { callLLM, parseLLMJson, getRecentChatContext, getRecentSpeakers, preflightLLM } from './llm-helper.js';
+import { callLLM, parseLLMJson, getLastGroundingSummary, getRecentChatContext, getRecentSpeakers, preflightLLM } from './llm-helper.js';
 import { searchPlaces, reverseGeocode } from './geo-service.js';
 import { MapRenderer } from './map-renderer.js';
 import { LeafletRenderer } from './leaflet-renderer.js';
@@ -353,7 +353,7 @@ export class UIManager {
     createSettingsPanel() {
         const html = `<div id="wt-settings" class="wt-settings"><div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.56-beta</span></b>
+                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.57-beta</span></b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div><div class="inline-drawer-content">
                 <div style="font-size:12px;font-weight:800;margin:2px 0 7px">기본 설정</div>
@@ -428,7 +428,7 @@ export class UIManager {
                         <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-top:7px">
                             <label style="display:block;min-width:0;font-size:9.5px;font-weight:700">표시 언어<select id="wt-s-eventlang" class="text_pole wt-select" style="display:block;width:100%;font-size:10px;margin-top:2px"><option value="ko">한국어</option><option value="en">영어</option></select></label>
                             <label style="display:block;min-width:0;font-size:9.5px;font-weight:700">생성 분량<select id="wt-s-genSize" class="text_pole wt-select" style="display:block;width:100%;font-size:10px;margin-top:2px"><option value="light">적게</option><option value="normal">보통</option><option value="rich">많이</option></select></label>
-                            <label style="display:block;min-width:0;font-size:9.5px;font-weight:700">현지 정보<select id="wt-s-enrich" class="text_pole wt-select" style="display:block;width:100%;font-size:10px;margin-top:2px"><option value="off">사용 안 함</option><option value="overpass">주변 정보</option><option value="grounding">구글 검색</option></select></label>
+                            <label style="display:block;min-width:0;font-size:9.5px;font-weight:700">현지 정보<select id="wt-s-enrich" class="text_pole wt-select" style="display:block;width:100%;font-size:10px;margin-top:2px"><option value="off">사용 안 함</option><option value="overpass">주변 정보</option><option value="grounding">실제 장소(Google)</option></select></label>
                         </div>
                     </div>
                 </div>
@@ -587,7 +587,7 @@ export class UIManager {
                     toastWarn('구글 검색은 Vertex 키를 저장한 뒤 사용할 수 있어요.');
                     $('#wt-s-enrich').val('off');
                     s.locationEnrichment = 'off';
-                } else if (!confirm('현지 정보에 구글 검색을 사용하면 장소명이 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. 계속할까요?')) {
+                } else if (!confirm('실제 장소 정보를 찾기 위해 장소명과 저장된 주소가 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. RP 채팅은 Google 검색 단계에 보내지 않습니다. 계속할까요?')) {
                     $('#wt-s-enrich').val('off');
                     s.locationEnrichment = 'off';
                 } else {
@@ -609,7 +609,7 @@ export class UIManager {
             if (s.llmMode !== 'direct' && s.locationEnrichment === 'grounding') {
                 s.locationEnrichment = 'off';
                 $('#wt-s-enrich').val('off');
-                toastWarn('연결 프로필에서는 구글 검색 보강이 꺼져요.');
+                toastWarn('연결 프로필에서는 실제 장소 정보 기능이 꺼져요.');
             }
             saveSettingsDebounced();
             _syncLlmModeUI();
@@ -1118,7 +1118,7 @@ export class UIManager {
         $('#wt-search-tab-addr').on('click', () => {
             this._searchMode = 'addr';
             $('#wt-search-tab-addr').addClass('wt-mode-active'); $('#wt-search-tab-loc').removeClass('wt-mode-active');
-            $('#wt-search-input').attr('placeholder', '📍 주소 입력 후 Enter (Photon/OSM)').val('');
+            $('#wt-search-input').attr('placeholder', '📍 주소 입력 후 Enter').val('');
             $('#wt-search-results').hide();
         });
         // 검색
@@ -3949,7 +3949,7 @@ ${trimmed.substring(0, 1500)}`;
             if (loc) {
                 const updates = {};
                 if (tags.length) updates.tags = tags;
-                // 사용자가 직접 입력한 주소만 Photon으로 검색
+                // 사용자가 직접 입력한 주소만 무료 지도 검색으로 전송
                 if (addr) {
                     updates.address = addr;
                     const [result] = await searchPlaces(addr, { limit: 1, automatic: false });
@@ -4549,7 +4549,7 @@ ${trimmed.substring(0, 1500)}`;
         }
 
         // 입력 중에는 저장 장소만 로컬 검색한다. Enter를 눌렀고 저장 장소가
-        // 하나도 없을 때만 사용자가 입력한 문구를 Photon/OSM에 전송한다.
+        // 하나도 없을 때만 사용자가 입력한 문구를 무료 지도 검색으로 전송한다.
         this._addressSearchSeq += 1;
         const matchCount = this._doLocSearch(q.toLowerCase());
         if (explicit && matchCount === 0) await this._doAddrSearch(q);
@@ -4610,7 +4610,7 @@ ${trimmed.substring(0, 1500)}`;
         return matches.length;
     }
 
-    // 📍 실제 주소 검색 (Photon/OSM — 사용자 명시 입력만 전송)
+    // 📍 실제 주소 검색 (Photon 우선, 필요할 때 Nominatim 보조 — 사용자 명시 입력만 전송)
     async _doAddrSearch(q) {
         const requestId = ++this._addressSearchSeq;
         if (q.length < 2) { $('#wt-search-results').hide(); return; }
@@ -4773,7 +4773,7 @@ ${trimmed.substring(0, 1500)}`;
         }
     }
 
-    // ========== 지오코딩 (Photon/OSM 주소 검색) ==========
+    // ========== 지오코딩 (Photon 우선, 필요할 때 Nominatim 보조) ==========
     _geoCache = {};
 
     async _geoSearch() {
@@ -4800,6 +4800,7 @@ ${trimmed.substring(0, 1500)}`;
                 automatic: false,
                 throwOnError: true,
                 bias: canBias ? { lat: current.lat, lng: current.lng } : undefined,
+                globalMerge: true,
             });
 
             if (!data.length) { resultsDiv.html('<div style="padding:4px;color:#9A8A7A">결과 없음</div>'); return; }
@@ -5185,7 +5186,7 @@ ${trimmed.substring(0, 1500)}`;
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><strong style="font-size:16px;color:#202124;flex:1">💬 커뮤니티 생성 방식</strong><button type="button" id="wt-community-mode-close" aria-label="닫기" style="border:0;background:#F1F3F4;border-radius:50%;width:30px;height:30px;cursor:pointer">✕</button></div>
                     <button type="button" id="wt-community-mode-basic" style="width:100%;text-align:left;padding:12px;border:1.5px solid #DADCE0;border-radius:11px;background:#fff;cursor:pointer;font-family:inherit"><b style="display:block;color:#202124">기본 생성</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#6F7378;line-height:1.4">저장된 장소 정보·이벤트·사용자/캐릭터명·최근 채팅 최대 800자와 선택한 AI 연결만 사용</span></button>
                     <button type="button" id="wt-community-mode-nearby" ${exactCoordinates ? '' : 'disabled'} style="width:100%;text-align:left;padding:12px;margin-top:8px;border:1.5px solid #B8D5C8;border-radius:11px;background:${exactCoordinates ? '#F2FBF6' : '#F4F4F4'};cursor:${exactCoordinates ? 'pointer' : 'not-allowed'};opacity:${exactCoordinates ? '1' : '.55'};font-family:inherit"><b style="display:block;color:#1E6B54">주변 장소 보강</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#5E756B;line-height:1.4">반올림한 확정 좌표로 Overpass 주변 POI를 조회한 뒤 같은 AI 연결 사용</span></button>
-                    <button type="button" id="wt-community-mode-grounding" ${groundingAvail ? '' : 'disabled'} style="width:100%;text-align:left;padding:12px;margin-top:8px;border:1.5px solid #F0D9A8;border-radius:11px;background:${groundingAvail ? '#FFFBF0' : '#F4F4F4'};cursor:${groundingAvail ? 'pointer' : 'not-allowed'};opacity:${groundingAvail ? '1' : '.55'};font-family:inherit"><b style="display:block;color:#9A6B1F">⭐ 구글 검색 보강</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#8A7350;line-height:1.4">실시간 구글 검색으로 현지 정보 반영 — Vertex 키 필요</span></button>
+                    <button type="button" id="wt-community-mode-grounding" ${groundingAvail ? '' : 'disabled'} style="width:100%;text-align:left;padding:12px;margin-top:8px;border:1.5px solid #F0D9A8;border-radius:11px;background:${groundingAvail ? '#FFFBF0' : '#F4F4F4'};cursor:${groundingAvail ? 'pointer' : 'not-allowed'};opacity:${groundingAvail ? '1' : '.55'};font-family:inherit"><b style="display:block;color:#9A6B1F">⭐ 실제 장소 정보</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#8A7350;line-height:1.4">Google로 장소를 먼저 조사한 뒤 실제 특징을 피드에 반영 — Vertex 키 필요</span></button>
                     ${groundingAvail ? '' : `<div style="font-size:10px;color:#A08050;margin-top:6px">사용 방법: 설정 → AI 연결 → Vertex 키 저장</div>`}
                     ${exactCoordinates ? '' : `<div style="font-size:10px;color:#A05A42;margin-top:6px">주변 보강 사용 불가: ${this._escapeHtml(coordinateState.reason)}</div>`}
                     <label style="display:flex;align-items:center;gap:6px;margin-top:12px;padding-top:10px;border-top:1px solid #F0EDE5;font-size:11.5px;color:#5A4A3A;cursor:pointer"><input type="checkbox" id="wt-community-mode-remember" ${(extension_settings[EXTENSION_NAME]?.communityGenRemember === true) ? 'checked' : ''} style="width:15px;height:15px"/> 이 선택 기억하기 (다음부터 바로 생성 — 피드의 모드 칩에서 변경 가능)</label>
@@ -5213,7 +5214,7 @@ ${trimmed.substring(0, 1500)}`;
             overlay.find('#wt-community-mode-grounding').on('click', () => {
                 if (!groundingAvail) return;
                 const settings = extension_settings[EXTENSION_NAME];
-                if (settings.locationEnrichment !== 'grounding' && !confirm('구글 검색을 사용하면 장소명이 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. 계속할까요?')) return;
+                if (settings.locationEnrichment !== 'grounding' && !confirm('실제 장소 정보를 찾기 위해 장소명과 저장된 주소가 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. RP 채팅은 Google 검색 단계에 보내지 않습니다. 계속할까요?')) return;
                 settings.locationEnrichment = 'grounding';
                 $('#wt-s-enrich').val('grounding');
                 saveSettingsDebounced();
@@ -5259,7 +5260,7 @@ ${trimmed.substring(0, 1500)}`;
             toastWarn(`주변 보강 차단 (${coordinateState.reason}) — 기본 생성으로 진행합니다.`);
             enrichMode = 'off';
         }
-        // 구글 검색 보강은 Vertex Express 키 연결에서만 사용한다.
+        // 실제 장소 정보는 Vertex Express 키 연결에서만 사용한다.
         const sG = extension_settings[EXTENSION_NAME] || {};
         if (enrichMode === 'grounding' && (sG.llmMode !== 'direct' || !getVertexApiKey())) {
             toastWarn('구글 검색 사용 불가 (Vertex 키 필요) — 기본 생성으로 진행합니다.');
@@ -5267,13 +5268,16 @@ ${trimmed.substring(0, 1500)}`;
         }
         window._wtUseGrounding = (enrichMode === 'grounding');
         this._commPending = locId;
-        // r16: 영구 잠김 방지 — 60초 후 강제 해제 (LLM이 hang 걸려도 다음 호출 가능)
+        // 2단계 실제 장소 모드는 검색+생성 시간이 필요하므로 잠금 여유를 늘린다.
         const pendingId = locId;
         const safetyTimer = setTimeout(() => {
             if (this._commPending === pendingId) {
                 this._commPending = null;
             }
-        }, 60000);
+        }, enrichMode === 'grounding' ? 150000 : 60000);
+        const slowNoticeTimer = enrichMode === 'grounding' ? setTimeout(() => {
+            if (this._commPending === pendingId) toastWarn('⏳ 실제 장소 조사와 피드 작성 중이에요. 조금만 더 기다려주세요.');
+        }, 18000) : null;
 
         try {
             const ctx = getContext();
@@ -5313,7 +5317,7 @@ ${trimmed.substring(0, 1500)}`;
             {
                 const sM = extension_settings[EXTENSION_NAME] || {};
                 const modeTag = (sM.llmMode === 'direct') ? '🔑 Vertex 키' : '🔗 연결 프로필';
-                const enrichTag = enrichMode === 'grounding' ? ' + ⭐구글검색' : enrichMode === 'overpass' ? ' + 🌿주변보강' : '';
+                const enrichTag = enrichMode === 'grounding' ? ' + ⭐실제장소' : enrichMode === 'overpass' ? ' + 🌿주변보강' : '';
                 toastSuccess(`💬 커뮤니티 생성 시작 — ${modeTag}${enrichTag}`);
             }
             if (enrichMode === 'overpass') {
@@ -5323,6 +5327,71 @@ ${trimmed.substring(0, 1500)}`;
                 if (poiContext) dbg(`🌐 POI enrichment: ${poiContext.length}c`);
                 else toastWarn('주변 정보를 찾지 못해 기본 생성으로 진행합니다.');
             }
+
+            // Google 모드는 장소 조사와 피드 생성을 분리한다.
+            // 검색 단계에는 장소명·주소만 보내며 RP 채팅·인물·사건은 포함하지 않는다.
+            let groundedFacts = [];
+            let groundingSourceCount = 0;
+            if (enrichMode === 'grounding') {
+                toastSuccess('⭐ 실제 장소 조사 중…');
+                const researchPrompt = `Google Search를 사용해 아래 장소를 짧게 조사해라.
+
+[검색 대상]
+장소명: ${this._plainText(loc.name, 120)}
+주소: ${this._plainText(loc.address || '주소 없음', 240)}
+
+[규칙]
+- 검색은 필요한 만큼만, 가능하면 1~2개 검색어로 끝낸다.
+- 동명 장소를 주소와 대조한다. 정확히 같은 장소인지 불확실하면 matched=false.
+- 실제 방문자가 피드에 쓸 만한 고유 특징·대표 시설·메뉴·공간·주변 지역 특색을 3~6개 찾는다.
+- 가격·영업시간·행사는 최신 근거가 확실할 때만 포함한다.
+- 검색에서 확인되지 않은 내용은 만들지 않는다.
+- URL, 검색어, 설명문은 출력하지 않는다.
+
+JSON만 출력:
+{"matched":true,"canonicalName":"정식 장소명","region":"도시·국가","confidence":"high|medium|low","facts":[{"text":"검색으로 확인된 구체적 사실","kind":"feature|food|space|local|tip|current"}]}`;
+
+                let researchResult = null;
+                try {
+                    window._wtUseGrounding = true;
+                    researchResult = await callLLM(researchPrompt, { maxTokens: 1280, temperature: 0.2, timeoutMs: 90000 });
+                } finally {
+                    window._wtUseGrounding = false;
+                }
+                if (!chatGuard()) { toastWarn('채팅이 바뀌어 AI 생성을 취소했습니다.'); return false; }
+
+                const groundingSummary = getLastGroundingSummary();
+                const research = parseLLMJson(researchResult || '');
+                const confident = ['high', 'medium'].includes(String(research?.confidence || '').toLowerCase());
+                if (groundingSummary?.used === true && research?.matched === true && confident && Array.isArray(research.facts)) {
+                    groundedFacts = research.facts.slice(0, 6).map((fact, index) => ({
+                        id: `F${index + 1}`,
+                        text: this._plainText(typeof fact === 'string' ? fact : fact?.text, 240),
+                        kind: this._plainText(typeof fact === 'object' ? fact?.kind : 'feature', 30),
+                    })).filter(fact => fact.text.length >= 8);
+                    groundingSourceCount = Number(groundingSummary.chunkCount) || 0;
+                }
+
+                if (groundedFacts.length) {
+                    toastSuccess(`⭐ 실제 장소 정보 ${groundedFacts.length}개 확인${groundingSourceCount ? ` · 검색 근거 ${groundingSourceCount}개` : ''} · 피드 만드는 중…`);
+                } else {
+                    toastWarn('⚠️ 정확한 실제 장소 정보를 확인하지 못해 기본 피드로 생성합니다.');
+                }
+            }
+
+            const groundedFactContext = groundedFacts.length ? `
+[GOOGLE_PLACE_FACTS_BEGIN — 검색으로 확인한 장소 정보]
+${groundedFacts.map(fact => `${fact.id} (${fact.kind}): ${fact.text}`).join('\n')}
+[GOOGLE_PLACE_FACTS_END]
+
+⭐ 실제 정보 반영 필수 규칙:
+- 전체 포스트의 절반 이상은 위 정보 중 하나를 내용에 구체적으로 녹인다.
+- 단순히 장소명만 언급하는 것은 반영으로 인정하지 않는다.
+- 실제 정보를 사용한 포스트에는 factIds 배열로 사용한 번호를 표시한다. 예: "factIds":["F1"]
+- 실제 정보를 쓰지 않은 포스트는 "factIds":[]로 표시한다.
+- 검색 정보에 없는 메뉴·시설·가격·영업시간을 실제 사실처럼 추가하지 않는다.
+- 이 factIds는 내부 검증용이며 트윗 본문에 F1 같은 번호를 쓰지 않는다.
+` : '';
 
             const prompt = `이 장소 주변에서 흘러나오는 **트위터 실시간 피드**를 생성해줘. 지역/장소 해시태그로 모인 **익명의 아무나**가 쓴 글들이다.
 
@@ -5351,7 +5420,7 @@ ${trimmed.substring(0, 1500)}`;
 장소: "${loc.name}"${loc.memo ? ` (${loc.memo.substring(0,80)})` : ''}${loc.address ? ` · ${loc.address.substring(0,60)}` : ''}
 유저="${userName}", 메인 캐릭터="${charName}"${isGroupChat && groupMembers.length ? `\n⚠️ 그룹챗 — 다른 멤버: ${groupMembers.slice(0,4).join(', ')} (단, **한 트윗에 1명만 언급**, 여러 명 나열 절대 금지)` : ''}
 최근 이곳 사건: ${evSummary}
-${langInst}${poiContext}
+${langInst}${poiContext}${groundedFactContext}
 ${recentChat ? `\n[최근 RP 맥락 — 이거 적극 활용해서 '목격담·뒷얘기' 트윗 만들어줘]:\n${recentChat.substring(0, 800)}\n` : ''}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
@@ -5702,7 +5771,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
 
             // v0.9.0: 창의성 ↑ — 커뮤니티는 temperature 0.95로 다양한 톤 유도
             // v0.9.0: maxTokens도 분량에 맞춰 (기본 4096은 7~9개 생성에 부족 → 잘림)
-            const result = await callLLM(prompt, { maxTokens: gen.maxTokens });
+            let result = await callLLM(prompt, { maxTokens: gen.maxTokens });
             if (!chatGuard()) { toastWarn('채팅이 바뀌어 생성 결과를 저장하지 않았습니다.'); return false; }
             window._wtLastErrorAt = new Date().toLocaleString('ko-KR');
             if (!result) {
@@ -5722,12 +5791,39 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                 }
                 return;
             }
-            const parsed = parseLLMJson(result);
+            let parsed = parseLLMJson(result);
             if (!parsed?.posts || !Array.isArray(parsed.posts)) {
                 window._wtLastErrorType = 'parse_failed';
                 window._wtLastErrorAt = new Date().toLocaleString('ko-KR');
                 toastWarn('⚠️ 커뮤니티 JSON 파싱 실패');
                 return;
+            }
+
+            // 실제 정보 모드에서는 모델이 factIds로 밝힌 반영 포스트 수를 검사한다.
+            // 부족할 때만 한 번 재생성하며, 세 번째 호출을 상시 발생시키지 않는다.
+            let groundedPostCount = 0;
+            if (groundedFacts.length) {
+                const validFactIds = new Set(groundedFacts.map(fact => fact.id));
+                const countGroundedPosts = posts => posts.filter(post => Array.isArray(post?.factIds) && post.factIds.some(id => validFactIds.has(String(id)))).length;
+                const requiredGroundedPosts = Math.max(2, Math.ceil(parsed.posts.length / 2));
+                groundedPostCount = countGroundedPosts(parsed.posts);
+                if (groundedPostCount < requiredGroundedPosts) {
+                    toastWarn(`⭐ 실제 정보 반영이 ${groundedPostCount}/${requiredGroundedPosts}개라 한 번 다시 생성합니다.`);
+                    const retryResult = await callLLM(`${prompt}\n\n[재생성 지시] 직전 출력은 실제 장소 정보 반영량이 부족했다. 최소 ${requiredGroundedPosts}개 포스트가 GOOGLE_PLACE_FACTS의 구체적 사실을 본문에 자연스럽게 사용하고 올바른 factIds를 반드시 표시해야 한다.`, { maxTokens: gen.maxTokens });
+                    if (!chatGuard()) { toastWarn('채팅이 바뀌어 생성 결과를 저장하지 않았습니다.'); return false; }
+                    const retryParsed = parseLLMJson(retryResult || '');
+                    if (Array.isArray(retryParsed?.posts) && retryParsed.posts.length) {
+                        result = retryResult;
+                        parsed = retryParsed;
+                        groundedPostCount = countGroundedPosts(parsed.posts);
+                    }
+                }
+                const finalRequired = Math.max(2, Math.ceil(parsed.posts.length / 2));
+                if (groundedPostCount < finalRequired) {
+                    window._wtLastErrorType = 'grounding_not_applied';
+                    toastWarn('⚠️ 실제 장소 정보 반영을 확인하지 못해 기존 피드를 유지합니다.');
+                    return false;
+                }
             }
             if (parsed.posts.length === 0) {
                 window._wtLastErrorType = 'empty_array';
@@ -5776,7 +5872,9 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
             for (const post of cleanPosts) {
                 await this.lm.addCommunityPost(locId, post);
             }
-            toastSuccess(`💬 ${cleanPosts.length}개 반응 생성!`);
+            toastSuccess(groundedFacts.length
+                ? `⭐ 실제 정보 ${groundedFacts.length}개 · 피드 ${cleanPosts.length}개 생성!`
+                : `💬 ${cleanPosts.length}개 반응 생성!`);
             this.pi?.inject();
             // r13: 오버레이가 열려있으면 바텀시트 재렌더 생략 (race condition 방지)
             // 오버레이 닫힌 상태에서 바텀시트의 미니피드만 갱신할 때만 _showBottomSheet 호출
@@ -5800,6 +5898,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
             return false;
         } finally {
             clearTimeout(safetyTimer);
+            if (slowNoticeTimer) clearTimeout(slowNoticeTimer);
             this._commPending = null;
             window._wtUseGrounding = false;  // v0.9.51: Grounding 플래그 해제
         }
@@ -5883,7 +5982,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
         const _modeChipLabel = () => {
             const sC = extension_settings[EXTENSION_NAME] || {};
             const m = sC.locationEnrichment;
-            return m === 'grounding' ? '⭐ 구글 검색' : m === 'overpass' ? '🌿 주변 보강' : '💬 기본 생성';
+            return m === 'grounding' ? '⭐ 실제 장소' : m === 'overpass' ? '🌿 주변 보강' : '💬 기본 생성';
         };
         const _updateModeChip = () => overlay.find('#wt-comm-mode-chip').text(_modeChipLabel());
         _updateModeChip();

@@ -1,5 +1,5 @@
 // 🐾 Paw Map — llm-helper.js (Connection Profile + Vertex AI Express)
-// v0.9.56: llmMode='profile'(ST 연결 프로필) | 'direct'(Vertex Express 키 + Google Search)
+// v0.9.57: llmMode='profile'(ST 연결 프로필) | 'direct'(Vertex Express 키 + Google Search)
 // 동의 시스템(externalAiEnabled/shareRpData)은 두 모드 모두에 적용됨
 
 import { getContext, extension_settings } from '../../../extensions.js';
@@ -10,6 +10,12 @@ import { getVertexApiKey, maskVertexApiKey } from './vertex-key-store.js';
 const dbg = () => {};
 
 let _requestInFlight = false;
+let _lastGroundingSummary = null;
+
+// 검색어·URL·장소명은 보관하지 않고, 실제 검색 근거가 왔는지만 호출 직후 확인한다.
+export function getLastGroundingSummary() {
+    return _lastGroundingSummary ? { ..._lastGroundingSummary } : null;
+}
 
 function _settings() {
     return extension_settings?.[EXTENSION_NAME] || {};
@@ -415,6 +421,7 @@ function _parseServiceAccount(jsonStr) {
 // 엔드포인트는 AI Studio와 달리 project/location 없음, 헤더로 인증
 async function _callVertexApiKey(apiKey, model, prompt) {
     const useGrounding = !!window._wtUseGrounding;
+    if (useGrounding) _lastGroundingSummary = null;
     const endpoint = `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:generateContent`;
     const _fetch = (body) => {
         const ctrl = new AbortController();
@@ -490,6 +497,21 @@ async function _callVertexApiKey(apiKey, model, prompt) {
             throw new Error(`Vertex(key) API ${res2.status}: ${res2.statusText}`);
         }
         const data2 = await res2.json();
+        if (useGrounding) {
+            const metadata = data2?.candidates?.[0]?.groundingMetadata || data2?.candidates?.[0]?.grounding_metadata || {};
+            const chunkCount = Array.isArray(metadata.groundingChunks) ? metadata.groundingChunks.length
+                : Array.isArray(metadata.grounding_chunks) ? metadata.grounding_chunks.length : 0;
+            const supportCount = Array.isArray(metadata.groundingSupports) ? metadata.groundingSupports.length
+                : Array.isArray(metadata.grounding_supports) ? metadata.grounding_supports.length : 0;
+            const queryCount = Array.isArray(metadata.webSearchQueries) ? metadata.webSearchQueries.length
+                : Array.isArray(metadata.web_search_queries) ? metadata.web_search_queries.length : 0;
+            _lastGroundingSummary = {
+                used: chunkCount > 0,
+                chunkCount,
+                supportCount,
+                queryCount,
+            };
+        }
         const parts2 = data2?.candidates?.[0]?.content?.parts || [];
         for (const part of parts2) {
             if (part.text && part.text.trim().startsWith('{')) return part.text;
@@ -634,12 +656,18 @@ export async function callLLM(prompt, options = {}) {
     }
 
     // ── 모드 B: 직접 API 호출 (v0.9.1 시스템 — Grounding/폴백/thinking 지원) ──
+    const previousMaxTokens = window._wtMaxTokensOverride;
+    const requestedMaxTokens = Number(options.maxTokens);
+    if (Number.isFinite(requestedMaxTokens)) {
+        window._wtMaxTokensOverride = Math.max(256, Math.min(8192, requestedMaxTokens));
+    }
     _requestInFlight = true;
     try {
         return await _callDirect(prompt, options);
     } finally {
         _requestInFlight = false;
         window._wtTempOverride = null;
+        window._wtMaxTokensOverride = previousMaxTokens ?? null;
     }
 }
 

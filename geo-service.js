@@ -1,10 +1,12 @@
 // PAW MAP — privacy-bounded geocoding helpers
-// Only explicit search text or RP-map coordinates are sent to Photon.
+// Explicit manual search can use Photon, then Nominatim as a result-quality fallback.
+// Automatic geocoding and reverse geocoding remain Photon-only.
 
 import { extension_settings } from '../../../extensions.js';
 
 const EXTENSION_NAME = 'rp-world-tracker';
 const PHOTON_BASE = 'https://photon.komoot.io';
+const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org';
 const CACHE_LIMIT = 100;
 const REQUEST_INTERVAL_MS = 1000;
 const COORDINATE_PRECISION = 4;
@@ -66,7 +68,7 @@ async function fairFetch(url, init = {}) {
             signal: controller.signal,
             headers: { Accept: 'application/json', ...(init.headers || {}) },
             credentials: 'omit',
-            referrerPolicy: 'no-referrer',
+            referrerPolicy: init.referrerPolicy || 'no-referrer',
         });
     } finally {
         clearTimeout(timer);
@@ -116,6 +118,59 @@ function normalizeFeature(feature) {
         type: cleanQuery(properties.type || properties.osm_value || ''),
         category: cleanQuery(properties.osm_key || ''),
         osmId: properties.osm_id || null,
+    };
+}
+
+function normalizeNominatimResult(item) {
+    const lat = finiteCoordinate(item?.lat, -90, 90);
+    const lng = finiteCoordinate(item?.lon, -180, 180);
+    if (lat == null || lng == null) return null;
+    const named = item?.namedetails || {};
+    const address = item?.address || {};
+    const name = cleanQuery(named['name:ko'] || named.name || item?.name || address.amenity || address.building || address.road || item?.display_name) || 'Unknown place';
+    const fullName = cleanQuery(item?.display_name) || name;
+    return {
+        name,
+        fullName,
+        display_name: fullName,
+        lat,
+        lng,
+        lon: lng,
+        type: cleanQuery(item?.addresstype || item?.type || ''),
+        category: cleanQuery(item?.category || item?.class || ''),
+        osmId: item?.osm_id || null,
+    };
+}
+
+function normalizedSearchText(value) {
+    return cleanQuery(value).normalize('NFKC').toLocaleLowerCase().replace(/[^0-9a-z가-힣]+/g, '');
+}
+
+function hasUsefulQueryOverlap(query, results) {
+    const tokens = cleanQuery(query).normalize('NFKC').toLocaleLowerCase()
+        .split(/[\s,]+/).map(normalizedSearchText).filter(token => token.length >= 2);
+    if (!tokens.length) return results.length > 0;
+    return results.some(result => {
+        const haystack = normalizedSearchText(`${result.name} ${result.fullName}`);
+        return tokens.some(token => haystack.includes(token));
+    });
+}
+
+async function searchNominatim(query, limit) {
+    const url = new URL(`${NOMINATIM_BASE}/search`);
+    url.searchParams.set('q', query);
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('addressdetails', '1');
+    url.searchParams.set('namedetails', '1');
+    url.searchParams.set('accept-language', 'ko,en');
+    url.searchParams.set('limit', String(limit));
+    // 수동 Enter 검색에서만 호출한다. 공개 서버 정책상 자동완성·백그라운드 호출은 하지 않는다.
+    const response = await fairFetch(url.toString(), { referrerPolicy: 'origin' });
+    if (!response.ok) return { ok: false, results: [] };
+    const data = await response.json();
+    return {
+        ok: true,
+        results: Array.isArray(data) ? data.map(normalizeNominatimResult).filter(Boolean) : [],
     };
 }
 
@@ -170,21 +225,41 @@ export async function searchPlaces(query, options = {}) {
                 if (Array.isArray(data?.features)) features.push(...data.features);
             } catch (_) {}
         }
-        if (!anyOk) {
-            if (throwOnError) throw new Error('Photon search failed');
-            return [];
-        }
         // 정규화 + 좌표 기준 dedupe (bias/global 중복 제거)
-        const seen = new Set();
-        const results = [];
+        const photonResults = [];
         for (const feature of features) {
             const norm = normalizeFeature(feature);
             if (!norm) continue;
-            const key = `${norm.lat?.toFixed?.(4)}|${norm.lng?.toFixed?.(4)}|${norm.fullName}`;
+            photonResults.push(norm);
+            if (photonResults.length >= limit * 2) break; // bias+global 합쳐 최대 2배
+        }
+
+        // Photon 결과가 없거나 한글 검색어와 전혀 맞지 않을 때만 Nominatim을 보조로 사용한다.
+        // 자동 장소 탐지에는 사용하지 않아 외부 전송 범위를 늘리지 않는다.
+        let nominatimOk = false;
+        let nominatimResults = [];
+        const hasHangul = /[가-힣]/.test(q);
+        const needsFallback = !automatic && (!photonResults.length || (hasHangul && !hasUsefulQueryOverlap(q, photonResults)));
+        if (needsFallback) {
+            try {
+                const fallback = await searchNominatim(q, limit);
+                nominatimOk = fallback.ok;
+                nominatimResults = fallback.results;
+            } catch (_) {}
+        }
+        if (!anyOk && !nominatimOk) {
+            if (throwOnError) throw new Error('Map search failed');
+            return [];
+        }
+
+        const seen = new Set();
+        const results = [];
+        for (const norm of [...nominatimResults, ...photonResults]) {
+            const key = `${norm.lat.toFixed(4)}|${norm.lng.toFixed(4)}|${normalizedSearchText(norm.fullName)}`;
             if (seen.has(key)) continue;
             seen.add(key);
             results.push(norm);
-            if (results.length >= limit * 2) break; // bias+global 합쳐 최대 2배
+            if (results.length >= limit * 2) break;
         }
         return remember(searchCache, cacheKey, results);
     } catch (error) {

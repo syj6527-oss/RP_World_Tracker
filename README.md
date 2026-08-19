@@ -1,4 +1,4 @@
-# 🐾 PAW MAP — v0.9.56 Beta
+# 🐾 PAW MAP — v0.9.57 Beta
 
 SillyTavern RP의 장소, 이동, 이벤트, NPC를 지도와 약도로 정리하는 확장입니다. 지도 본체는 키가 필요 없는 공개 지도 소스를 사용하며, Google 지도 웹 링크는 기본 OFF인 선택 기능입니다.
 
@@ -6,11 +6,11 @@ SillyTavern RP의 장소, 이동, 이벤트, NPC를 지도와 약도로 정리�
 
 - Leaflet CDN/CARTO 래스터 지도 대신 로컬 번들 MapLibre GL + OpenFreeMap 벡터 지도를 사용합니다.
 - 지도 엔진 코드와 CSS는 확장에 포함되어 있어 실행 중 외부 CDN에서 스크립트를 받지 않습니다.
-- 하나의 지도 검색창에서 등록 장소를 먼저 찾고, 결과가 없을 때 Enter를 누르면 Photon/OpenStreetMap 주소 검색으로 이어집니다. 입력 중에는 외부로 보내지 않습니다.
+- 하나의 지도 검색창에서 등록 장소를 먼저 찾고, 결과가 없을 때 Enter를 누르면 Photon/OpenStreetMap 주소 검색으로 이어집니다. Photon 결과가 없거나 한글 검색어와 맞지 않으면 Nominatim을 한 번 보조로 사용합니다. 입력 중에는 외부로 보내지 않습니다.
 - 자동 장소명 지오코딩은 기본 OFF이며, 사용자가 별도로 동의한 경우에만 동작합니다.
 - 지도를 직접 꾹 눌러 새 장소를 등록하거나 핀을 직접 옮기면, 그 RP 좌표만 Photon에 보내 주소를 자동 입력합니다.
 - Google 지도·Google 길찾기는 키 없는 웹 링크이며 `구글맵 연동`을 켰을 때만 보입니다. Street View는 확정 좌표가 있으면 항상 사용할 수 있습니다.
-- AI 생성은 SillyTavern 연결 프로필 또는 사용자가 직접 저장한 Vertex AI Express 키를 사용합니다. Vertex 키 연결에서는 선택적으로 Google Search 보강을 사용할 수 있습니다.
+- AI 생성은 SillyTavern 연결 프로필 또는 사용자가 직접 저장한 Vertex AI Express 키를 사용합니다. Vertex 키 연결에서는 선택적으로 `실제 장소 정보` 기능을 사용할 수 있습니다.
 
 ## 장소 자동 등록과 오탐 방지
 
@@ -38,9 +38,9 @@ SillyTavern RP의 장소, 이동, 이벤트, NPC를 지도와 약도로 정리�
 
 ## 커뮤니티 생성 방식
 
-- `기본 생성`: Google·Photon·Overpass를 호출하지 않고 저장된 RP 장소·이벤트·캐릭터 맥락으로 생성합니다.
+- `기본 생성`: Google·Photon·Nominatim·Overpass를 호출하지 않고 저장된 RP 장소·이벤트·캐릭터 맥락으로 생성합니다.
 - `주변 정보 보강 생성`: 확정 좌표를 반올림해 Overpass에 보내고 주변 POI를 받아 생성에 보강합니다. `≈ 추정 핀`에서는 사용하지 않습니다.
-- 두 방식 모두 선택한 SillyTavern 연결 프로필 또는 Vertex 키를 사용합니다. Vertex 키 연결에서는 `구글 검색 보강`도 선택할 수 있습니다.
+- 두 방식 모두 선택한 SillyTavern 연결 프로필 또는 Vertex 키를 사용합니다. Vertex 키 연결의 `실제 장소 정보`는 장소명·주소만 Google로 먼저 조사한 뒤, 확인한 정보가 피드 절반 이상에 반영됐는지 검사합니다. Google 검색 단계에는 RP 채팅을 넣지 않습니다.
 - PAW MAP이 별도 카드나 결제 계정을 연결하지는 않습니다. 선택한 AI 계정의 토큰·크레딧·사용량은 소모될 수 있습니다.
 
 ## 보안 기본값
@@ -67,7 +67,7 @@ AI 기능은 PAW MAP이 새 결제 계정이나 카드를 연결하는 방식이
 | 대상 | 언제 통신하나 | 전달되는 정보 | 기본값 |
 |---|---|---|---|
 | OpenFreeMap | 현실 지도 화면을 열 때 | 지도 화면 영역에 필요한 타일/스타일 요청, 일반적인 네트워크 메타데이터(IP 등) | 지도 열기 시 사용 |
-| Photon | 지도 검색창에서 등록 장소 결과가 없을 때 Enter를 누르거나 주소 검색 버튼을 누를 때 | 입력한 검색어, 선택적으로 현재 RP 지도 중심 좌표 | 수동 검색만 |
+| Photon / Nominatim | 지도 검색창에서 등록 장소 결과가 없을 때 Enter를 누르거나 주소 검색 버튼을 누를 때. Nominatim은 Photon 결과가 없거나 한글 검색어와 맞지 않을 때만 보조 호출 | 입력한 검색어, Photon에는 선택적으로 현재 RP 지도 중심 좌표 | 수동 검색만 |
 | Photon | 지도 꾹 누르기 또는 핀 직접 이동 | 사용자가 직접 지정한 RP 지도 좌표 | 수동 조작 시 |
 | Photon | 감지된 장소명 자동 지오코딩/백그라운드 역지오코딩 | 감지된 RP 장소명 또는 저장된 RP 지도 좌표 | OFF |
 | Overpass API | “주변 정보 보강 생성”을 선택할 때 | 소수점 4자리로 반올림한 확정 RP 좌표 | 사용자 선택 |
@@ -75,7 +75,7 @@ AI 기능은 PAW MAP이 새 결제 계정이나 카드를 연결하는 방식이
 | Google Street View 웹 | 확정 좌표가 있는 장소에서 Street View를 직접 누를 때 | 저장된 RP 좌표, 일반 네트워크 메타데이터 | 사용자 클릭 |
 | 선택한 SillyTavern 연결 프로필 | `AI 기능 사용`을 켜고 생성 기능을 실행할 때 | 해당 기능의 프롬프트, 장소·이벤트·캐릭터·선택된 채팅 맥락 | OFF |
 | Vertex AI Express | AI 기능을 켜고 `Vertex 키`로 생성 기능을 실행할 때 | 해당 기능의 프롬프트, 장소·이벤트·캐릭터·선택된 채팅 맥락, API 인증 헤더 | OFF |
-| Google Search Grounding | Vertex 키 연결에서 `구글 검색` 보강을 선택할 때 | 장소명과 생성 프롬프트의 관련 맥락 | OFF |
+| Google Search Grounding | Vertex 키 연결에서 `실제 장소 정보`를 선택할 때 | 장소명과 저장된 주소. RP 채팅·캐릭터명·사건은 검색 단계에서 제외 | OFF |
 | 일반 채팅의 AI 공급자 | “지도 맥락을 일반 채팅 AI에 전송”을 켠 뒤 평소 채팅 생성 시 | 장소·주소·이벤트·NPC·사용자가 고정한 항목(최대 12,000자, 선택한 연결 계정의 토큰·크레딧 사용량 증가 가능) | OFF |
 
 공개 서비스에는 가용성 보장(SLA)이 없습니다. 서비스가 일시적으로 실패하면 약도 모드나 로컬 데이터는 계속 사용할 수 있지만 현실 지도·검색 결과는 표시되지 않을 수 있습니다.
@@ -106,6 +106,7 @@ AI 기능은 PAW MAP이 새 결제 계정이나 카드를 연결하는 방식이
 - OpenFreeMap: https://openfreemap.org/
 - OpenStreetMap contributors: https://www.openstreetmap.org/copyright
 - Photon: https://photon.komoot.io/
+- Nominatim: https://nominatim.openstreetmap.org/
 - Overpass API: https://wiki.openstreetmap.org/wiki/Overpass_API
 
 ## 알려진 한계
@@ -118,6 +119,12 @@ AI 기능은 PAW MAP이 새 결제 계정이나 카드를 연결하는 방식이
 - 공개 지도/검색 서비스의 정책이나 가용성이 바뀌면 엔드포인트 교체가 필요할 수 있습니다.
 - 같은 SillyTavern 페이지에서 실행되는 다른 확장까지 격리하는 보안 경계는 아닙니다. 신뢰하지 않는 확장과 함께 사용하지 마세요.
 - Vertex Express 키는 브라우저 로컬 저장소에 있으므로 같은 SillyTavern 주소의 다른 스크립트가 읽을 수 있습니다. 키에는 사용량 한도와 필요한 API만 허용하는 제한을 권장합니다.
+
+## v0.9.57-beta 변경 요약
+
+- Google 검색과 피드 생성을 분리해 장소명·주소만 먼저 조사하고, 확인된 실제 정보가 피드 절반 이상에 반영됐는지 검사
+- 검색 결과가 실제 피드에 부족하면 한 번만 자동 재생성하고, 처리 지연 시 진행 알림 표시
+- Photon 결과가 없거나 한글 검색어와 맞지 않을 때 수동 Enter 검색에만 Nominatim 보조 검색 추가
 
 ## v0.9.56-beta 변경 요약
 
