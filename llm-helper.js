@@ -1,5 +1,5 @@
 // 🐾 Paw Map — llm-helper.js (Connection Profile + Vertex AI Express)
-// v0.9.55: llmMode='profile'(ST 연결 프로필) | 'direct'(Vertex Express 키 + Google Search)
+// v0.9.56: llmMode='profile'(ST 연결 프로필) | 'direct'(Vertex Express 키 + Google Search)
 // 동의 시스템(externalAiEnabled/shareRpData)은 두 모드 모두에 적용됨
 
 import { getContext, extension_settings } from '../../../extensions.js';
@@ -435,7 +435,7 @@ async function _callVertexApiKey(apiKey, model, prompt) {
     if (!useGrounding) try {
         const res = await _fetch({
             systemInstruction: { parts: [{ text: 'You are a JSON-only assistant. Respond with valid JSON only.' }] },
-            contents: [{ parts: [{ text: prompt }] }],  // v0.8.2: role 제거 (Vertex Express 호환)
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
             generationConfig: { temperature: (window._wtTempOverride ?? 0.7), maxOutputTokens: (window._wtMaxTokensOverride ?? 4096), responseMimeType: 'application/json' },
         });
         if (res.ok) {
@@ -475,7 +475,7 @@ async function _callVertexApiKey(apiKey, model, prompt) {
     // 2차: fallback
     try {
         const body2 = {
-            contents: [{ parts: [{ text: prompt + '\n\nCRITICAL: Respond with ONLY valid JSON. Start with { and end with }. No markdown, no explanation.' }] }],
+            contents: [{ role: 'user', parts: [{ text: prompt + '\n\nCRITICAL: Respond with ONLY valid JSON. Start with { and end with }. No markdown, no explanation.' }] }],
             generationConfig: { temperature: (window._wtTempOverride ?? 0.7), maxOutputTokens: (window._wtMaxTokensOverride ?? 4096) },
         };
         // v0.8.2: Grounding 지원 (Vertex AI)

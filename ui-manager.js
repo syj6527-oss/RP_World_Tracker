@@ -353,7 +353,7 @@ export class UIManager {
     createSettingsPanel() {
         const html = `<div id="wt-settings" class="wt-settings"><div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.55-beta</span></b>
+                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.56-beta</span></b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div><div class="inline-drawer-content">
                 <div style="font-size:12px;font-weight:800;margin:2px 0 7px">기본 설정</div>

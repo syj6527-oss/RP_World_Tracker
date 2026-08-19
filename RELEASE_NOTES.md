@@ -1,4 +1,9 @@
-# PAW MAP v0.9.55 Beta — 인수 메모
+# PAW MAP v0.9.56 Beta — 인수 메모
+
+## v0.9.56 Vertex 요청 형식 수정
+
+- Vertex Express 일반 호출과 Google 검색 보강 호출의 `contents`에 `role: user`를 명시했습니다.
+- 기능과 설정 UI는 변경하지 않았습니다.
 
 ## v0.9.55 Vertex·설정창 정리
 
