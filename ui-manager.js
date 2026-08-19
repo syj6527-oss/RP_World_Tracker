@@ -42,6 +42,12 @@ export class UIManager {
         this._reviewCache = new Map();
         this._reviewPending = new Set();
         this._addressSearchSeq = 0;
+        this._communityPhotoQueue = [];
+        this._communityPhotoBusy = false;
+        this._communityPhotoNextAt = 0;
+        this._communityPhotoBlobCache = new Map();
+        this._communityPhotoPending = new Map();
+        this._communityPhotoObserver = null;
         // Persistent/global debug capture is intentionally disabled in the secure build.
         this._debugEnabled = false;
         this.detectionCandidates = null;
@@ -353,7 +359,7 @@ export class UIManager {
     createSettingsPanel() {
         const html = `<div id="wt-settings" class="wt-settings"><div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.58-beta</span></b>
+                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.60-beta</span></b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div><div class="inline-drawer-content">
                 <div style="font-size:12px;font-weight:800;margin:2px 0 7px">기본 설정</div>
@@ -587,7 +593,7 @@ export class UIManager {
                     toastWarn('구글 검색은 Vertex 키를 저장한 뒤 사용할 수 있어요.');
                     $('#wt-s-enrich').val('off');
                     s.locationEnrichment = 'off';
-                } else if (!confirm('실제 장소 정보를 찾기 위해 장소명과 저장된 주소가 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. RP 채팅은 Google 검색 단계에 보내지 않습니다. 계속할까요?')) {
+                } else if (!confirm('실제 장소 정보를 찾기 위해 장소명과 저장된 주소가 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. 장소 사진이 표시되면 공개 장소 사진 단서와 IP가 Pollinations에 전달됩니다. RP 채팅은 Google 검색·사진 생성 단계에 보내지 않습니다. 계속할까요?')) {
                     $('#wt-s-enrich').val('off');
                     s.locationEnrichment = 'off';
                 } else {
@@ -2722,6 +2728,7 @@ ${trimmed.substring(0, 1500)}`;
             </div>`;
 
         bs.html(html).show().css({ background: '#fff' });
+        this._prepareCommunityPhotos(bs[0]);
         this._applyBsStage(1); // peek
         this._bindBsDrag(bs[0]); // ★ 터치 드래그 바인딩!
         bs.find('.wt-bs-handle').css({ position: 'sticky', top: 0, zIndex: 10, background: '#fff' });
@@ -5186,7 +5193,7 @@ ${trimmed.substring(0, 1500)}`;
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><strong style="font-size:16px;color:#202124;flex:1">💬 커뮤니티 생성 방식</strong><button type="button" id="wt-community-mode-close" aria-label="닫기" style="border:0;background:#F1F3F4;border-radius:50%;width:30px;height:30px;cursor:pointer">✕</button></div>
                     <button type="button" id="wt-community-mode-basic" style="width:100%;text-align:left;padding:12px;border:1.5px solid #DADCE0;border-radius:11px;background:#fff;cursor:pointer;font-family:inherit"><b style="display:block;color:#202124">기본 생성</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#6F7378;line-height:1.4">저장된 장소 정보·이벤트·사용자/캐릭터명·최근 채팅 최대 800자와 선택한 AI 연결만 사용</span></button>
                     <button type="button" id="wt-community-mode-nearby" ${exactCoordinates ? '' : 'disabled'} style="width:100%;text-align:left;padding:12px;margin-top:8px;border:1.5px solid #B8D5C8;border-radius:11px;background:${exactCoordinates ? '#F2FBF6' : '#F4F4F4'};cursor:${exactCoordinates ? 'pointer' : 'not-allowed'};opacity:${exactCoordinates ? '1' : '.55'};font-family:inherit"><b style="display:block;color:#1E6B54">주변 장소 보강</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#5E756B;line-height:1.4">반올림한 확정 좌표로 Overpass 주변 POI를 조회한 뒤 같은 AI 연결 사용</span></button>
-                    <button type="button" id="wt-community-mode-grounding" ${groundingAvail ? '' : 'disabled'} style="width:100%;text-align:left;padding:12px;margin-top:8px;border:1.5px solid #F0D9A8;border-radius:11px;background:${groundingAvail ? '#FFFBF0' : '#F4F4F4'};cursor:${groundingAvail ? 'pointer' : 'not-allowed'};opacity:${groundingAvail ? '1' : '.55'};font-family:inherit"><b style="display:block;color:#9A6B1F">⭐ 실제 장소 정보</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#8A7350;line-height:1.4">Google로 장소를 먼저 조사한 뒤 실제 특징을 피드에 반영 — Vertex 키 필요</span></button>
+                    <button type="button" id="wt-community-mode-grounding" ${groundingAvail ? '' : 'disabled'} style="width:100%;text-align:left;padding:12px;margin-top:8px;border:1.5px solid #F0D9A8;border-radius:11px;background:${groundingAvail ? '#FFFBF0' : '#F4F4F4'};cursor:${groundingAvail ? 'pointer' : 'not-allowed'};opacity:${groundingAvail ? '1' : '.55'};font-family:inherit"><b style="display:block;color:#9A6B1F">⭐ 실제 장소 정보</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#8A7350;line-height:1.4">Google 조사 결과를 피드에 반영하고 공개 장소 사진을 순차 표시 — Vertex 키 필요</span></button>
                     ${groundingAvail ? '' : `<div style="font-size:10px;color:#A08050;margin-top:6px">사용 방법: 설정 → AI 연결 → Vertex 키 저장</div>`}
                     ${exactCoordinates ? '' : `<div style="font-size:10px;color:#A05A42;margin-top:6px">주변 보강 사용 불가: ${this._escapeHtml(coordinateState.reason)}</div>`}
                     <label style="display:flex;align-items:center;gap:6px;margin-top:12px;padding-top:10px;border-top:1px solid #F0EDE5;font-size:11.5px;color:#5A4A3A;cursor:pointer"><input type="checkbox" id="wt-community-mode-remember" ${(extension_settings[EXTENSION_NAME]?.communityGenRemember === true) ? 'checked' : ''} style="width:15px;height:15px"/> 이 선택 기억하기 (다음부터 바로 생성 — 피드의 모드 칩에서 변경 가능)</label>
@@ -5214,7 +5221,7 @@ ${trimmed.substring(0, 1500)}`;
             overlay.find('#wt-community-mode-grounding').on('click', () => {
                 if (!groundingAvail) return;
                 const settings = extension_settings[EXTENSION_NAME];
-                if (settings.locationEnrichment !== 'grounding' && !confirm('실제 장소 정보를 찾기 위해 장소명과 저장된 주소가 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. RP 채팅은 Google 검색 단계에 보내지 않습니다. 계속할까요?')) return;
+                if (settings.locationEnrichment !== 'grounding' && !confirm('실제 장소 정보를 찾기 위해 장소명과 저장된 주소가 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. 장소 사진이 표시되면 공개 장소 사진 단서와 IP가 Pollinations에 전달됩니다. RP 채팅은 Google 검색·사진 생성 단계에 보내지 않습니다. 계속할까요?')) return;
                 settings.locationEnrichment = 'grounding';
                 $('#wt-s-enrich').val('grounding');
                 saveSettingsDebounced();
@@ -5331,6 +5338,9 @@ ${trimmed.substring(0, 1500)}`;
             // Google 모드는 장소 조사와 피드 생성을 분리한다.
             // 검색 단계에는 장소명·주소만 보내며 RP 채팅·인물·사건은 포함하지 않는다.
             let groundedFacts = [];
+            let groundedPhotoCues = [];
+            let groundedCanonicalName = '';
+            let groundedRegion = '';
             let groundingSourceCount = 0;
             if (enrichMode === 'grounding') {
                 toastSuccess('⭐ 실제 장소 조사 중…');
@@ -5347,10 +5357,12 @@ ${trimmed.substring(0, 1500)}`;
 - 실제 방문자가 피드에 쓸 만한 고유 특징·대표 시설·메뉴·공간·주변 지역 특색을 2~6개 찾는다.
 - 가격·영업시간·행사는 최신 근거가 확실할 때만 포함한다.
 - 검색에서 확인되지 않은 내용은 만들지 않는다.
+- 사진용 단서 photoCues는 검색으로 확인한 공개 장소·풍경·음식·공간만 짧은 영어 문장으로 2~4개 작성한다.
+- photoCues에 사람 이름, 대화, 개인 정보, URL, API 키를 넣지 않는다.
 - URL, 검색어, 설명문은 출력하지 않는다.
 
 JSON만 출력:
-{"matched":true,"matchLevel":"exact|area|name_only","canonicalName":"정식 장소명 또는 검색된 이름","region":"도시·국가","facts":[{"text":"검색하거나 확인한 구체적 장소·지역 정보","kind":"feature|food|space|local|tip|current"}]}`;
+{"matched":true,"matchLevel":"exact|area|name_only","canonicalName":"정식 장소명 또는 검색된 이름","region":"도시·국가","facts":[{"text":"검색하거나 확인한 구체적 장소·지역 정보","kind":"feature|food|space|local|tip|current"}],"photoCues":["short English description of a verified public view or detail"]}`;
 
                 let researchResult = null;
                 try {
@@ -5366,12 +5378,17 @@ JSON만 출력:
                 // Google 도구가 검색 근거를 줬거나 조사 응답에 쓸 만한 사실이 있으면 사용한다.
                 // matched/confidence 문자열 형태 차이로 전체 결과를 버리지 않는다.
                 if (Array.isArray(research?.facts)) {
+                    groundedCanonicalName = this._safePublicPhotoText(research?.canonicalName, 100);
+                    groundedRegion = this._safePublicPhotoText(research?.region, 100);
                     groundedFacts = research.facts.slice(0, 6).map((fact, index) => ({
                         id: `F${index + 1}`,
                         text: this._plainText(typeof fact === 'string' ? fact : fact?.text, 240),
                         kind: this._plainText(typeof fact === 'object' ? fact?.kind : 'feature', 30),
                     })).filter(fact => fact.text.length >= 4);
-                    groundingSourceCount = Number(groundingSummary.chunkCount) || 0;
+                    groundedPhotoCues = Array.isArray(research?.photoCues)
+                        ? research.photoCues.slice(0, 4).map(cue => this._safePublicPhotoText(cue, 180)).filter(Boolean)
+                        : [];
+                    groundingSourceCount = Number(groundingSummary?.chunkCount) || 0;
                 }
 
                 if (groundedFacts.length) {
@@ -5388,7 +5405,7 @@ ${groundedFacts.map(fact => `${fact.id} (${fact.kind}): ${fact.text}`).join('\n'
 [GOOGLE_PLACE_FACTS_END]
 
 ⭐ 실제 정보 반영 필수 규칙:
-- 전체 포스트의 절반 이상은 위 정보 중 하나를 내용에 구체적으로 녹인다.
+- 전체 포스트의 60~70%는 위 정보 중 하나를 내용에 구체적으로 녹인다.
 - 단순히 장소명만 언급하는 것은 반영으로 인정하지 않는다.
 - 실제 정보를 사용한 포스트에는 factIds 배열로 사용한 번호를 표시한다. 예: "factIds":["F1"]
 - 실제 정보를 쓰지 않은 포스트는 "factIds":[]로 표시한다.
@@ -5396,35 +5413,33 @@ ${groundedFacts.map(fact => `${fact.id} (${fact.kind}): ${fact.text}`).join('\n'
 - 이 factIds는 내부 검증용이며 트윗 본문에 F1 같은 번호를 쓰지 않는다.
 ` : '';
 
+            const mixPlan = Array.from(
+                { length: Math.max(1, gen.max - gen.min + 1) },
+                (_, index) => {
+                    const total = gen.min + index;
+                    const placeCount = Math.round(total * 0.65);
+                    return `${total}개면 place ${placeCount}개 + 나머지 ${total - placeCount}개`;
+                },
+            ).join(' / ');
+
             const prompt = `이 장소 주변에서 흘러나오는 **트위터 실시간 피드**를 생성해줘. 지역/장소 해시태그로 모인 **익명의 아무나**가 쓴 글들이다.
 
 ⚠️⚠️⚠️ **JSON 안전 규칙 (최우선!)** ⚠️⚠️⚠️
 본문은 순수 텍스트로만 작성. HTML, Markdown 링크, 이미지 URL, 외부 리소스, 스크립트는 절대 출력하지 말 것.
 모든 문자열은 JSON에 맞게 이스케이프하고, 유효한 JSON 객체 하나만 출력할 것.
 
-🚨🚨🚨 **창의성 규칙 — 예시 복붙 절대 금지!** 🚨🚨🚨
-아래 프롬프트에 나오는 **"카자흐스탄", "사막", "라그만", "사막여우", "지옥철", "라멘" 등의 구체 단어**는 **다양한 나라 예시**일 뿐이다.
-**현재 장소는 "${loc.name}"** 이다! 이 장소의 나라·지역·분위기에 맞는 완전히 새로운 내용으로 써라.
-장소가 어디인지 불명확하면 **일반 트윗 + 동물 트윗**으로만 채워. 엉뚱한 나라 끌어오지 말 것!
-
-🎨 **톤 다양성 — 30/40/30 비율 필수!** (모든 트윗이 감탄사 시작/ㅋㅋㅠㅠ 도배 금지)
-
-[30%] **담백** (ㅋㅋ/ㅠㅠ 없음): "자취하면 귀여운 주방용품만 사게 됨" / "오늘 노을 예뻤다."
-[40%] **약한 감성** (ㅋㅋ 1~2개): "이 동네 고양이 또 왔음 ㅋㅋ" / "사람 많아서 혼났다 ㅠ"
-[30%] **폭발 감성** (ㅋㅋㅋㅋㅋ 5개+): "미친 실화냐고 ㅋㅋㅋㅋㅋㅋ 심장 해롭다ㅠㅠ"
-
-⛔ 금지: 연속 트윗이 모두 "미친/헐/와" 시작 · 모든 트윗에 ㅋㅋ/ㅠㅠ · 이모티콘 남발
-✅ 시작 섞기: "오늘/방금/아 근데" (담백) · "아 진짜" (약함) · "미친/헐/와 씨" (폭발)
-✅ 종결어미 섞기: ~함/임/됨 · ~했어/이에요 · ~같음/인듯 · ~냐고??? · ~할뻔 (~하네/~야 남발 금지)
-🌈 화자 다양성: 매번 다른 사람들 — 나이·직업·성격 폭넓게(직장인·학생·노인·자취생·관광객 등), 동물 트윗도 종류 다양하게(고양이·개·새·길동물). 같은 핸들/말투 반복 금지.
-
-✏️ **한국어 맞춤법** (한국어 설정일 때): "어떡해"(감탄/당황) ≠ "어떻게"(방식) · "안 돼"(X 않되) · "됐어"(X 됬어) · "왠지/웬" 구분
+자연스러운 실제 SNS 피드처럼 써라.
+- 대부분은 담백한 관찰·짧은 후기·혼잣말이고, 강한 호들갑은 전체에서 1~2개만 허용한다.
+- 모든 글을 "미친/헐/와/방금"으로 시작하지 말고, ㅋㅋ·ㅠㅠ·해시태그·감탄부호를 매 글마다 넣지 않는다.
+- 같은 시작어·종결어미·핸들·비유·정보를 반복하지 않는다.
+- 광고 문구나 관광 안내문처럼 정보를 나열하지 말고, 포스트 하나에는 구체적 디테일 하나만 자연스럽게 녹인다.
+- 화자는 서로 다른 방문객·주민·직장인·학생·관광객 등으로 보이게 한다.
 
 장소: "${loc.name}"${loc.memo ? ` (${loc.memo.substring(0,80)})` : ''}${loc.address ? ` · ${loc.address.substring(0,60)}` : ''}
 유저="${userName}", 메인 캐릭터="${charName}"${isGroupChat && groupMembers.length ? `\n⚠️ 그룹챗 — 다른 멤버: ${groupMembers.slice(0,4).join(', ')} (단, **한 트윗에 1명만 언급**, 여러 명 나열 절대 금지)` : ''}
 최근 이곳 사건: ${evSummary}
 ${langInst}${poiContext}${groundedFactContext}
-${recentChat ? `\n[최근 RP 맥락 — 이거 적극 활용해서 '목격담·뒷얘기' 트윗 만들어줘]:\n${recentChat.substring(0, 800)}\n` : ''}
+${recentChat ? `\n[최근 RP 맥락 — 현재 장소와 직접 이어질 때만 목격담 0~2개에 사용]:\n${recentChat.substring(0, 800)}\n` : ''}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 🎯 핵심 원칙 — "장소 기반 트위터 타임라인"
@@ -5441,285 +5456,63 @@ ${recentChat ? `\n[최근 RP 맥락 — 이거 적극 활용해서 '목격담·�
 단, 트윗 **내용 안에서는** 유저("${userName}")나 캐릭터("${charName}")에 대한 목격담·뒷얘기를 적극적으로 다뤄도 됨.
 
 구성 (총 ${countLabel} 포스트):
-- **🏛️ 해당 장소 특화 트윗 2~3개** ★★★ (최우선!) — "${loc.name}" 자체에 대한 경험담/후기/정보 공유
-- **🌍 현지 색깔 트윗 1~2개** — 그 나라/지역 특색 (음식·문화·날씨·언어) 반영
-- **🔥 목격담·뒷얘기 트윗 0~2개** — 익명 유저가 "방금 ${charName}이랑 ${userName}이 ~하던데..." 같은 현장 중계 (RP 맥락 있을 때만)
-- **💭 일반 익명 트윗 1개** — 동네 관련 일상/불평
-- **🐱 익명 동물 1개** — 길고양이, 들개, 까마귀, 비둘기 등 (type:"animal")
+- **🏛️ 장소 기반 60~70%** — "${loc.name}" 자체·주변 실제 정보·현지 디테일 기반
+- **💬 나머지 30~40%** — 최근 RP 목격담, 동네 일상, 동물 시점 중 맥락에 맞는 것
+- 정확한 개수표: ${mixPlan}. 선택한 총개수에 맞춰 이 비율을 정확히 지킨다.
+- 현지 색깔은 확인 가능한 정보가 있을 때 1~2개에만 자연스럽게 넣는다.
+- RP 목격담은 현재 장소와 이어지는 최근 장면이 있을 때만 0~2개 작성한다.
+- 동물 글은 어울릴 때 최대 1개만 작성한다.
+
+각 포스트에는 source를 반드시 넣어라:
+- "place": 장소명·실제 정보·주변 명소·현지 디테일 기반
+- "chat": 최근 RP 목격담·뒷얘기 기반
+- "local": 장소 주변 일반 일상
+- "animal": 동물 시점
+- imagePrompt나 이미지 URL은 출력하지 않는다. 사진은 확장이 공개 장소 조사 결과로 별도 처리한다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 🏛️ 해당 장소 특화 트윗 (⭐ 최우선 핵심 기능!) 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-**"${loc.name}" 이 장소 자체에 대한 트윗 2~3개를 반드시 넣어줘.**
-이게 이 피드의 가장 중요한 포인트! "이 동네"로 퉁치지 말고 **장소 이름을 직접 해시태그나 본문에 언급**.
-
-**장소 유형별 트윗 예시 (참고만, 현재 장소에 맞게 새로 써!):**
-
-📍 [카페/식당/술집]
-- 메뉴 평가: "${loc.name} 아메리카노 맛있네... 산미 있는 스타일 좋아하면 추천 #${loc.name}"
-- 분위기: "${loc.name} 2층 창가 자리 진짜 명당임ㅠㅠ 공부하기 딱"
-- 직원 후기: "${loc.name} 알바생 존잘;;; 커피 주면서 웃는데 심장 내려앉음 #${loc.name}"
-- 꿀팁: "${loc.name} 10시 이후 가면 사람 없어서 좋음 방금 왔는데 나밖에 없어ㅋㅋ"
-- 불평: "${loc.name} 와이파이 왜이렇게 느림? 여기서 일 못하겠다"
-
-📍 [관광지/명소]
-- 감상: "런던아이 진짜 미쳤다... 사진 안 담기는 게 아쉬울뿐 #런던아이"
-- 팁: "런던아이 앞 장사꾼 진짜 조심하셈 막 덥석덥석 따라옴"
-- 추천: "런던아이 해질녘에 타면 개예뻐요 진짜 추천"
-- 인증샷: "런던아이 왔음. 눈으로 보는 게 훨씬 낫다"
-
-📍 [공원/자연]
-- 날씨/분위기: "한강공원 오늘 바람 대박 시원... 치맥 각 치맥"
-- 명당: "여의도공원 벤치 중 ○○쪽이 제일 조용함 알아두셈"
-- 이벤트: "한강공원 오늘 사람 미쳤네 뭐 행사 있나봄"
-
-📍 [집/방/사적 공간] — 이런 경우 장소 특화 대신 일반 트윗으로!
-
-**작성 규칙:**
-- 해시태그 #${loc.name} 적극 활용 (이게 피드를 묶는 키!)
-- **구체적 디테일** — 메뉴명, 구역, 시간대, 직원 특징 등
-- **진짜 방문자 톤** — "${loc.name} 갔다왔는데 ~", "${loc.name} 다녀옴", "지금 ${loc.name}에 있는데 ~"
-- **리뷰·팁·불평·자랑 다양하게** 섞기
-- 장소가 실제 유명 관광지면 **진짜 그 장소의 특징** 반영 (런던아이=해지는 풍경, 에펠탑=야간 조명 등)
-- 장소가 가상/판타지면 **그 세계관의 분위기** 반영
+장소 기반 글은 방문 후기만 반복하지 말고 풍경·동선·음식·공간·작은 불편·주변 일상을 나눠 쓴다.
+"이 동네"로 전부 뭉개지 말고 장소명이나 확인된 특징을 자연스럽게 짚되, 모든 글에 장소명과 해시태그를 반복하지 않는다.
+실제 장소 정보가 주어졌다면 source:"place" 글마다 GOOGLE_PLACE_FACTS의 구체적 사실 하나 이상을 사용하고 정확한 factIds를 넣는다.
+집·방·가상 장소처럼 공개 사실이 없는 경우에는 저장된 설정 안에서만 쓰며 실제 시설·메뉴·영업시간을 지어내지 않는다.
 
 
-**[최근 RP 맥락]을 적극 활용해서** 익명의 제3자가 유저/캐릭터의 현장을 목격한 것처럼 중계하는 트윗.
-장면 하나 잡아서 익명 관찰자 시점으로 풀어.
-
-**🚨 이름 언급 규칙 (중요!):**
-- **한 트윗에 이름은 최대 2명까지만** (주로 ${charName} 1명, 또는 ${charName}+${userName} 2명)
-- **절대 금지: NPC 목록 나열!**
-  ❌ 나쁜 예시: "방금 ODEON 지나가는데 Ghost Soap Price Alejandro Horangi König이랑 Honey badger가 같이 있는 거 봤음"
-  ✅ 좋은 예시: "방금 ODEON 지나가는데 ${charName} 봄ㅋㅋㅋㅋ 뭐하는 중?"
-  ✅ 좋은 예시: "ODEON 앞에서 ${charName}이랑 ${userName} 싸우고 있어 미친;; #${charName}"
-- NPC 전체 리스트 중 **단 1명만 골라** 사용 (그 장면에 실제 등장한 인물)
-- 해시태그에도 이름 하나만 (#${charName} 정도)
-- 가끔은 이름 대신 "저 사람", "어떤 커플", "그 팀"처럼 완전 익명화 OK
-
-**작성 팁:**
-- 이름 언급 OK: "${charName}", "${userName}" 직접 써도 되고, "저 남자/여자", "어떤 커플", "~팀"처럼 익명화해도 OK
-- 제3자 시점이어야 함 — "방금 봤는데", "아까 ~하던데", "저 앞에서 ~함", "~하는 거 봤음"
-- **거리 둔 관찰자 톤** — 당사자가 아니라 근처에서 우연히 목격한 느낌
-- 대화 내용 인용: "'그만 좀 해!' 이러던데 뭔 일ㅋㅋ"
-- 디테일 포인트: 표정, 몸짓, 들린 대사 등
-
-**톤 예시 (형식 참고용 — 장소/상황은 현재 RP 맥락에 맞게 새로!):**
-"방금 ${charName}이 ~하던데 미친;; 뭐임??"
-"아까 ${userName} 표정 진짜 안 좋던데... 뭔 일 있었냐고"
-"${charName}이 ${userName}한테 뭐라뭐라 하던데 옆자리라 다 들림ㅋㅋㅋ"
-"헐 방금 ${charName}이 ${userName}한테 뺨 맞음;;;"
-"어떤 커플 싸우던데 대박... 남자 쫓겨남"
-"아까 ${charName}이 ${userName} 머리 쓰다듬어주는 거 봤는데 나 녹음ㅠㅠ"
-
-**⚠️ 주의:**
-- 목격담은 **${countLabel} 중 0~2개**만. 너무 많으면 어색함.
-- **RP에 이 장소에서의 장면이 없으면 목격담 완전 생략!** 억지로 만들지 말고 일반 트윗 + 현지색으로 대체.
-- 캐릭터/유저가 "어디 갔다"는 **현재 장소와 무관한 다른 장소** 언급 금지 (예: 현재 장소가 "교내카페"인데 "사막 쪽으로 갔다" ← 금지)
-- **RP 맥락이 아예 없거나 짧아도 반드시 ${countLabel} 포스트를 생성해야 함.** 일반 익명 트윗·현지색·동물로만 채워도 OK. 절대 빈 배열 반환 금지!
-- 등록 캐릭터가 직접 트윗을 쓰는 건 절대 금지 (관찰자만).
+최근 RP 목격담은 현재 장소와 직접 이어지는 장면 하나만 익명의 제3자 시점으로 쓴다.
+- 한 글에 이름은 최대 2명, NPC는 실제 등장한 1명만 언급한다. 인물 목록을 나열하지 않는다.
+- 이름을 반복하기보다 "두 사람", "앞에 있던 사람"처럼 자연스럽게 익명화할 수 있다.
+- 표정·몸짓·짧게 들린 말 중 하나만 잡고, 사건 전체를 요약하거나 과장하지 않는다.
+- RP에 현재 장소 장면이 없으면 목격담은 생략한다. 다른 장소로 갔다고 지어내지 않는다.
+- RP 맥락이 없어도 장소 기반 글과 주변 일상으로 정해진 포스트 수를 채운다.
+- 등록 캐릭터나 NPC가 직접 글을 쓰게 하지 않는다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 🎭 익명 프로필 (다양하게 섞기!)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-**이름**: 트위터 닉네임 스타일. 장르/지역에 맞게 자유롭게.
-- 지역 연상: "[지역명]_주민", "[지역명]_토박이", "[동네]단골", "현지러버" (예시 키워드 베끼지 말고 현재 장소 기반으로!)
-- 평범: "익명", "지나가는행인", "이름없음", "밤새는사람"
-- 캐릭터성: "커피중독자", "야행성올빼미", "개덕후", "집순이", "퇴근희망"
-- 동물: "길고양이_3번", "까악까악", "옥상냥이", "들개_갈색이", "공원비둘기"
-
-**@핸들**: 영문 소문자+언더스코어+숫자. "@desert_rat42", "@local_kazakh", "@coffee_addict", "@alley_cat3"
-
-**avatar**: 아래 3가지 **섞어서** 써. 각 포스트마다 다른 스타일. 반드시 **이모지 1개만**.
-1. 고정 랜덤: ☺ 🌵 🤔 🌕 ☀ 🌙 💭 🫠 🐾 ✨ 📷 ☕ 🎧
-2. 지역/장소 연상: (사막→🐪🌵, 기지→🪖⚙, 카페→☕🧁, 조선→🏯👘 중 하나)
-3. 심플 아바타: 👤 👥 👨 👩 🧑 👻
-4. 동물 아바타: 🐱 🐶 🦊 🐦 🐦‍⬛ 🐿️ 🦝 🦜 🐀 🐕
-
-**type**: 사람이면 "anon", 동물이면 "animal"
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-✍️ 톤·주제 (전부 섞어서 다양하게!)
-━━━━━━━━━━━━━━━━━━━━━━━━
-
-한 피드 안에 아래 톤들이 **골고루** 들어가야 함. 말투는 **여초 트위터 감성**으로 호들갑·공감·심쿵·중계·스토리텔링 자유롭게:
-
-🔸 **호들갑/중계 (ㅋㅋㅋㅋㅋ 감성)**
-   "여기 왤케 덥냐고 ㅋㅋㅋㅋㅋㅋ 나 지금 녹음"
-   "미친... 또 와이파이 끊김 ㅋㅋㅋㅋ 어떻게 이 동네는 1년째 이럼?"
-   "아 진짜 이 더위 실화냐고ㅠㅠㅠ 에어컨 안 나옴 나 지금 죽음"
-   "하 씨 오늘도 지각각 ㅠㅠ"
-
-🔸 **심쿵/인용 리액션**
-   "방금 옆 테이블에서 '오늘 저녁 뭐 해줄까' 이러는데 나 울뻔 ㅠㅠ"
-   "'이 노래 너 생각나서 저장해놨어'래... 나 지금 심장 해롭다"
-   "저 골목 강아지 오늘도 꼬리 흔들어주는데... 너무 귀여워서 거북목 완치됨"
-
-🔸 **스토리텔링 (일화 풀기)**
-   "야 근데 어제 카페에서 옆 테이블 커플 대박이었음ㅋㅋ 여자가 '오늘 비 오면 우산 들고 올게'라는데 남자가 우산을 이미 3개 갖고 왔다던... 미치겠다 진짜"
-   "조카가 이모한테 영통걸어서 우리집 강아지 자랑하는데 짜식ㅋㅋ 자기 강아지가 최고인줄 아나봄ㅋㅋ"
-   "아 맞다 어제 그 식당 갔는데 진짜 미쳤네... 사장님이 서비스로 떡 하나 더 줬는데 개 맛있음"
-
-🔸 **관찰/공감 유도**
-   "창밖 노을 미친 존예... 사진 안 담기는거 나만 그럼?"
-   "이 동네 고양이 완전 개살찜 ㅋㅋㅋㅋ 나만 보나"
-   "오늘따라 사람 많지 않음? 다들 뭐 하러 온거야"
-   "아침 공기 ㄹㅇ 선선함 산책 각"
-
-🔸 **뉴스/루머 (속보 톤)**
-   "방금 큰길에 검은차 대여섯대 지나감 이거 뭐임 ㅋㅋ"
-   "아 근처 상가 오늘 일찍 닫음 왜 다들 도망가는데"
-   "들은 얘긴데 여기 예전에 뭐 있었다던데 소름돋음;;"
-
-🔸 **일상/혼잣말 (짧고 툭)**
-   "배고픔"
-   "잠 왜 안오지ㅠ"
-   "집가고 싶다 진짜"
-   "커피 마시는 중~"
-   "하 오늘은 야식 안 참을 거야"
-
-🔸 **밈화·별명**
-   "이 동네 바람 ㄹㅇ 경고 사격 파티 ㅋㅋㅋㅋ"
-   "저 신호등 뭐임 '나는 절대 안 바뀔거야'라고 적혀있음 ㅋㅋㅋ"
-   "이 가게 사장님 레전드임... 손님이 주문하면 '알겠다'고만 하고 메뉴 다 알아서 해줌"
-
-🔸 **동물 시점 (type:"animal")**
-   고양이: "창가 자리 오늘도 사수 성공~"
-   들개: "빵집 뒷문 오늘도 클리어"
-   까마귀: "반짝이는 거 주움 내 거임"
-   비둘기: "공원 벤치 밑 과자 부스러기 발견함"
-   * 짧고 툭 치는 어조. 과하게 귀엽게 X
+- 이름과 핸들은 짧고 서로 겹치지 않는 SNS 닉네임으로 만든다.
+- avatar는 화자나 장소에 맞는 이모지 하나만 사용한다.
+- 사람이면 type:"anon", 동물이면 type:"animal"이다.
+- 담백한 관찰·짧은 후기·작은 불평·가벼운 감탄을 섞고, 동물 글은 짧고 과하게 귀엽게 쓰지 않는다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 🌍 현지 색깔 — 지역·문화 특색 필수 반영!
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-**⚠️ 중요: 아래 예시는 여러 나라를 골고루 보여주는 샘플이야. 절대 그대로 따라 쓰지 말고, 현재 장소 "${loc.name}"${loc.address ? ` (${loc.address})` : ''} 이 어느 나라/지역인지 파악해서 그 나라·지역 특색을 반영해.**
-
-장소명, 주소, 메모로 판단. 만약 장소가 명백히 특정 나라가 아닌 일반 공간이면(예: "방", "내 집", "학교") → 현지색 트윗은 생략해도 됨. **억지로 "카자흐스탄" 같은 엉뚱한 나라 끌어오지 말 것!**
-
-**담아야 할 현지 요소 (장소에 맞는 것만):**
-- 🍜 **현지 음식·음료**: 카자흐=라그만/쉬라크, 한국=뚝배기/배달, 일본=라멘/자판기,
-  베트남=쌀국수/반미, 스페인=츄러스/타파스, 터키=차이, 영국=피쉬앤칩스,
-  멕시코=타코, 태국=팟타이, 중국=훠궈/딤섬 등
-- 🗣️ **현지 인사·표현 가끔**: "라흐맛~"(카자흐), "그라시아스", "아리가또", "땡큐"
-  (주 언어는 설정된 AI 언어를 따르되, 짧은 현지 인사말만 양념처럼 1~2번 섞기. 본문 전체를 그 나라 언어로 쓰지 말 것!)
-- 🏛️ **현지 문화·관습**: 현지 호칭(아저씨/아줌마/형님), 인사 문화
-- 🌤️ **현지 날씨·환경**: 사막 모래바람, 동남아 스콜, 시베리아 추위, 알프스 눈
-- 🛒 **현지 생활상**: 한국=배민/지옥철, 일본=편의점/자판기, 미국=월마트
-
-**다양한 지역 예시 (참고용, 베끼지 말 것!):**
-
-[카자흐스탄 예시]
-"아니 어제 마트에서 계산하는데 뒤에 아저씨가 '오늘 저녁은 라그만 어때?' 이러는데 나 울뻔 ㅠㅠㅠ 찐 현지 아저씨 바이브"
-"사막 모래바람 또 옴 ㅠㅠ 빨래 다시 해야됨"
-
-[한국 예시]
-"아 지금 지옥철 타는중... 이거 실화냐 ㅋㅋㅋㅋ #출근지옥"
-"편의점 도시락이 제일 맛있어 진심ㅠㅠ"
-"배민 치킨 1시간째 '조리중' 이거 실화?ㅋㅋㅋ"
-
-[일본 예시]
-"아 자판기 또 옆에 새로 생김 ㅋㅋㅋ 이 동네 자판기 밀도 세계 1위"
-"편의점 오뎅 미쳤다... 겨울 왔구나 실감남ㅠㅠ"
-
-[베트남 예시]
-"아침부터 쌀국수 한 그릇 때림... 3천원 실화 ㅠㅠㅠ"
-"스콜 또 옴 우산 의미없는 동네"
-
-[영국 예시]
-"여긴 왜 일요일에 문을 다 닫냐고 ㅋㅋㅋㅋ 편의점이 제일 부러움"
-"피쉬앤칩스 또 먹음. 이 동네 살이 찔 수밖에 없음"
-
-[스페인 예시]
-"이 동네 낮잠시간 진짜 있음 ㅋㅋㅋ 가게 다 닫혀있어"
-"타파스 한 접시에 맥주 한 잔... 천국임"
-
-**현지 해시태그 활용:** #지역이름, #현지음식, #일상 — 장소에 맞게
-
-**⚠️ 규칙:**
-- 현지색 **1~2개 포스트에만** 녹여. 5개 전부는 오버.
-- **장소가 어느 나라인지 불명확하면 현지색 트윗 생략!** 엉뚱한 나라 끌어오지 말 것.
-- 장소가 가상/판타지(성, 던전, 우주선)면 그 세계관 색깔로 (중세·SF 용어 등).
-- 장소가 실내·일반 공간(방, 사무실, 카페)이고 국적 단서 없으면 일반 트윗으로 대체.
+장소명·주소·GOOGLE_PLACE_FACTS에서 확인되는 음식·문화·날씨·생활상만 사용한다.
+지역이 불명확하면 현지색을 억지로 만들지 않는다. 가상 장소는 저장된 세계관 범위에서만 쓴다.
+현지 표현과 해시태그는 양념처럼 소수 글에만 사용한다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-📏 포맷 규칙 (여초 감성 필수!)
+📏 포맷·말투 규칙
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-- 1~3줄 짧은 트윗. @멘션·#해시태그 자연스럽게 (2~3개)
-
-━━━ ✅ 여초 트위터 말투 핵심 ━━━
-
-**[감탄사·시작어]**
-"미친...", "미친ㅋㅋㅋ", "와", "헐", "아 진짜", "어떻게", "야", "아니", "짜식ㅋㅋ"
-
-**[본인 상태 중계]**
-"나 지금 ~ 죽음", "나 지금 ~ 완치됨", "숨 넘어감", "심장 해롭다"
-"이마쳐서 거북목 완치됨", "울뻔", "나 ~때문에 ~됨", "미치겠다 진짜"
-
-**[호들갑·탄식 어미]**
-"~아니냐고 ㅋㅋㅋ", "~아니냐고", "어떻게 ~함?", "어떻게 저러냐"
-"~할 수가 있나", "~가 있냐고", "이게 실화냐...", "~네 진짜 미쳤네"
-
-**[공감 유도]**
-"나만 ~냐", "나만 ~임?", "~ 나만 들리냐", "나만 이런가"
-"다들 ~함?", "다들 ~지 않음?", "이거 나만 그래?"
-
-**[인용형 반응 — 핵심!]**
-"'집에 가자'래... 나 지금 죽음"  ← 캐치한 걸 따옴표로 포인트
-"'미친 ~' 이거 진짜 ~ 아니냐고"
-"'~' 이러는데 나 울뻔 ㅠㅠ"
-"'~' 했음. 미치겠다 진짜"
-
-**[스토리텔링 리액션 — 긴 호흡]**
-일화/경험담 툭 풀어놓기 OK. "야 근데 어제 ~했는데 ~함 ㅋㅋㅋㅋ" 같은 긴 문장도 좋음.
-"짜식ㅋㅋ 우리집 ~가 자랑스럽나보군ㅋ" 같은 다정한 놀림 OK.
-
-**[웃음 표현 (긴 ㅋ 권장!)]**
-"ㅋㅋㅋㅋㅋㅋㅋㅋ" (5개 이상 자주), "ㅋㅋㅋ나", "웃다가 숨 넘어감"
-"ㅠㅠㅠㅠ", "ㅜㅜ" (2개 이상)
-
-**[짧은 종결 어미]**
-~함, ~임, ~음, ~됨, ~지?, ~같음, ~인듯, ~이래, ~래, ~네, ~네..., ~줌, ~해줌
-
-**[밈화·별명 붙이기]**
-"~레전드", "~전설", "~가 미쳤네", "경고 사격 파티"
-뭔가를 괄호로 묶거나 별명 붙이기
-
-**[감성·강조 표현]**
-"존예", "존맛", "미쳤", "미친", "ㄹㅇ", "ㅇㅈ", "인정", "대박"
-"개좋음", "개웃김", "개귀여움" (강조 부사 OK)
-"~되네...", "~뚝뚝 떨어짐", "~진심", "~진짜 천재"
-"하 씨", "아 진짜" 같은 감탄 OK
-
-**[비속어·욕 — 제한적 허용]**
-가벼운 비속어는 OK: "하 씨", "미쳤네 진짜", "짜증남", "존X(존예/존맛)"
-**단, "X같다/좆같다/ㅈㄴ/ㅆㅂ" 같은 직접적 욕설은 자제** — 꼭 필요한 강조에만
-
-━━━ 🚫 절대 금지 (일베/디시/여성혐오) ━━━
-
-**[일베·디시 말체 — 전면 금지]**
-~노, ~누, ~하노, ~꺼라, ~카노, ~긋네, 기모띠, 노근본, ㄱㅈㅇㅈ, ㅇㄱㄹㅇ
-팩트, 킹받네, 디시체, 일베체, ㅆㅇㅈ, 아웃사이더, 보빨, 오워어
-
-**[마렵다 계열 — 전면 금지]**
-개마렵다, 개마려움, ~마렵다, ~마려움 (남초 특유 표현)
-
-**[여성혐오 표현 — 전면 금지]**
-김치녀, ~녀 (특정 여성 지칭 비하), 된X, 맘충, 꼴페미, 냄비
-여성 외모/나이/몸매 조롱, 여자 비하 유머
-"여자들은~" 같은 성별 일반화
-
-**[남성 중심 유머 금지]**
-ㅂㅅ아, "X냐고 ㅋㅋ" 조롱조, 아재개그, "형님" 문화
-여성을 대상화하는 표현, 성적 농담
-
-━━━ 기타 규칙 ━━━
-- **메타 내레이션 금지** — "~에 있는 인물이 트윗을 작성한다" 같은 서술 X
-- **"*행동*" 별표 액션 금지** — 그냥 트윗처럼 써
+- 포스트는 1~3문장으로 짧게 쓴다. 긴 ㅋ·ㅠㅠ, 유행어, 밈은 필요할 때만 쓴다.
+- 혐오 표현·성별 비하·일베/디시 말투·직접적인 욕설은 사용하지 않는다.
+- 메타 내레이션과 *행동* 형식은 쓰지 않는다.
+- 한국어에서는 "어떡해/어떻게", "안 돼", "됐어"를 문맥에 맞게 쓴다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 💬 답글 (replies) — 트위터 감성 핵심!
@@ -5728,13 +5521,7 @@ ${recentChat ? `\n[최근 RP 맥락 — 이거 적극 활용해서 '목격담·�
 각 포스트에 **답글을 0~2개 랜덤하게** 달아. 전부 다 달 필요 없음.
 답글은 **더 짧고 툭 치는 한 줄**. 본 트윗에 대한 리액션.
 
-답글 스타일 예시:
-- 공감: "ㅋㅋㅋㅋㅋㅋ 나두", "ㄹㅇ임ㅠㅠ", "미친 공감ㅠㅠㅠ", "ㅇㅈ..."
-- 추임새: "헐", "와 진짜요?", "어머..", "대박"
-- 정보추가: "거기 원래 그럼ㅠ", "저번주에도 그랬어요"
-- 농담/드립: "ㅋㅋㅋㅋㅋㅋ 살아계시네요", "부럽다 진짜", "이건 좀...ㅋㅋ"
-- 질문: "거기 어디임?", "몇시쯤이요??", "진짜로요???"
-- 짧은 반응: "힘내요ㅠㅠ", "그러게요ㅠ", "와...", "ㅠㅠㅠ"
+답글은 공감·짧은 질문·작은 정보 추가 중 하나로 쓰고, 같은 감탄사나 ㅋ·ㅠ를 반복하지 않는다.
 
 답글도 익명 유저/동물만. 등록 캐릭터 NPC 금지.
 답글 구조: {"name":"...", "handle":"@...", "avatar":"...", "text":"..."}
@@ -5758,23 +5545,16 @@ JSON 출력 예시 — **이건 형식/구조만 참고해. 내용은 절대 따
 (아래 [플레이스홀더]는 실제로는 이 장소의 나라/지역 특색으로 교체)
 
 {"posts":[
-  {"name":"[장소방문객]","handle":"@[장소_visitor]","avatar":"[장소연상이모지]","type":"anon","mood":"romantic","moodLabel":"😊 기쁨","text":"[\"${loc.name}\" 경험담/후기/감상] #${loc.name}","likes":15,"replies":[{"name":"[공감닉]","handle":"@[핸들]","avatar":"[이모지]","text":"[공감/질문 답글]"},{"name":"[정보러]","handle":"@[핸들2]","avatar":"💡","text":"[추가 정보]"}]},
-  {"name":"[장소단골]","handle":"@[장소_regular]","avatar":"☕","type":"anon","mood":"chill","moodLabel":"😌 나른","text":"[\"${loc.name}\" 꿀팁/메뉴 추천/명당 정보] #${loc.name}","likes":12,"replies":[{"name":"[궁금닉]","handle":"@[핸들]","avatar":"👀","text":"[질문]"}]},
-  {"name":"[장소불평러]","handle":"@[장소_complaint]","avatar":"😤","type":"anon","mood":"tense","moodLabel":"😵 멘붕","text":"[\"${loc.name}\"에 대한 불평/아쉬운점] #${loc.name}","likes":8,"replies":[]},
-  {"name":"[지역특화_닉네임]","handle":"@[지역_핸들]","avatar":"[지역연상이모지]","type":"anon","mood":"romantic","moodLabel":"😊 기쁨","text":"[현지 음식/문화 관련 심쿵 일화]","likes":9,"replies":[{"name":"[공감닉]","handle":"@[핸들]","avatar":"[이모지]","text":"[짧은 공감 답글]"}]},
-  {"name":"[장소구경꾼]","handle":"@[watcher_핸들]","avatar":"👀","type":"anon","mood":"excited","moodLabel":"🔥 목격","text":"방금 ${charName}이 [목격 장면] 미친;; [반응]","likes":12,"replies":[{"name":"[궁금닉]","handle":"@[핸들]","avatar":"👀","text":"헐 뭐라고요??"}]},
-  {"name":"[혼잣말닉]","handle":"@[핸들]","avatar":"🌙","type":"anon","mood":"sleepy","moodLabel":"😮‍💨 피곤","text":"[짧은 혼잣말이나 동네 일상]","likes":4,"replies":[{"name":"[공감닉]","handle":"@[핸들]","avatar":"🫠","text":"[공감]"}]},
-  {"name":"[동물이름_번호]","handle":"@[animal_핸들]","avatar":"[동물이모지]","type":"animal","mood":"chill","moodLabel":"😌 나른","text":"[동물 시점 일상]","likes":6,"replies":[{"name":"[덕후]","handle":"@[핸들]","avatar":"[이모지]","text":"귀여움ㅠㅠ"}]}
+  {"name":"[장소방문객]","handle":"@[서로다른_핸들]","avatar":"[이모지1개]","type":"anon","source":"place","mood":"chill","moodLabel":"😌 느긋","text":"[확인된 장소 디테일 하나를 자연스럽게 쓴 짧은 글]","likes":8,"factIds":["F1"],"replies":[]},
+  {"name":"[목격자닉]","handle":"@[서로다른_핸들]","avatar":"👀","type":"anon","source":"chat","mood":"excited","moodLabel":"👀 목격","text":"[현재 장소와 이어지는 최근 RP 장면의 짧은 목격담]","likes":5,"factIds":[],"replies":[{"name":"[답글닉]","handle":"@[핸들]","avatar":"💭","text":"[짧고 자연스러운 답글]"}]}
 ]}
 
-🚨 **위 예시는 구조만 참고해. 절대로 "카자흐", "사막", "라그만" 같은 단어를 그대로 쓰면 안 됨!** 현재 장소 "${loc.name}"${loc.address ? ` (${loc.address})` : ''} 이 어느 나라/지역인지 파악해서 그 나라 특색으로 완전히 새로 작성해.
-예를 들어 장소가 "교내 카페"면 한국 대학생 감성 / "도쿄 시부야"면 일본 도시 감성 / "제주도 해변"이면 제주 감성으로!
+위 예시는 구조만 참고하고 현재 장소와 맥락에 맞는 새 내용으로 작성한다.
 
 JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
 
-            // v0.9.0: 창의성 ↑ — 커뮤니티는 temperature 0.95로 다양한 톤 유도
-            // v0.9.0: maxTokens도 분량에 맞춰 (기본 4096은 7~9개 생성에 부족 → 잘림)
-            let result = await callLLM(prompt, { maxTokens: gen.maxTokens });
+            // 자연스러움을 위해 기본 temperature(0.7)를 유지하고 분량만 확장한다.
+            let result = await callLLM(prompt, { maxTokens: gen.maxTokens, temperature: 0.7 });
             if (!chatGuard()) { toastWarn('채팅이 바뀌어 생성 결과를 저장하지 않았습니다.'); return false; }
             window._wtLastErrorAt = new Date().toLocaleString('ko-KR');
             if (!result) {
@@ -5802,24 +5582,34 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                 return;
             }
 
-            // factIds는 반영을 돕는 안내 장치다. 하나도 없을 때만 한 번 재생성하고,
-            // 다시 부족해도 결과 전체를 폐기하지 않는다.
-            let groundedPostCount = 0;
-            if (groundedFacts.length) {
-                const validFactIds = new Set(groundedFacts.map(fact => fact.id));
-                const countGroundedPosts = posts => posts.filter(post => Array.isArray(post?.factIds) && post.factIds.some(id => validFactIds.has(String(id)))).length;
-                const requiredGroundedPosts = Math.max(2, Math.ceil(parsed.posts.length / 2));
-                groundedPostCount = countGroundedPosts(parsed.posts);
-                if (groundedPostCount === 0) {
-                    toastWarn(`⭐ 실제 정보 표시가 빠져 한 번 다시 생성합니다. 목표 ${requiredGroundedPosts}개`);
-                    const retryResult = await callLLM(`${prompt}\n\n[재생성 지시] 직전 출력은 실제 장소 정보 반영량이 부족했다. 최소 ${requiredGroundedPosts}개 포스트가 GOOGLE_PLACE_FACTS의 구체적 사실을 본문에 자연스럽게 사용하고 올바른 factIds를 반드시 표시해야 한다.`, { maxTokens: gen.maxTokens });
-                    if (!chatGuard()) { toastWarn('채팅이 바뀌어 생성 결과를 저장하지 않았습니다.'); return false; }
-                    const retryParsed = parseLLMJson(retryResult || '');
-                    if (Array.isArray(retryParsed?.posts) && retryParsed.posts.length) {
-                        result = retryResult;
-                        parsed = retryParsed;
-                        groundedPostCount = countGroundedPosts(parsed.posts);
-                    }
+            // 60~70% 비율을 실제 결과에서 검사한다. 실패하면 결과를 버리지 않고
+            // 같은 공급자에 한 번만 구조 교정을 요청한다.
+            const validFactIds = new Set(groundedFacts.map(fact => fact.id));
+            const mixStats = posts => {
+                const usable = (Array.isArray(posts) ? posts : []).slice(0, 12).filter(post => post && post.text);
+                const total = usable.length;
+                const targetTotal = total ? Math.max(gen.min, Math.min(gen.max, total)) : gen.min;
+                const targetPlace = Math.round(targetTotal * 0.65);
+                const isGrounded = post => Array.isArray(post?.factIds) && post.factIds.some(id => validFactIds.has(String(id)));
+                const placeCount = usable.filter(post => post?.source === 'place' || isGrounded(post)).length;
+                const groundedCount = groundedFacts.length ? usable.filter(isGrounded).length : placeCount;
+                const placeRatio = total ? placeCount / total : 0;
+                const score = Math.abs(total - targetTotal) + Math.abs(placeCount - targetPlace) + Math.max(0, targetPlace - groundedCount);
+                const ratioOk = placeRatio >= 0.6 && placeRatio <= 0.7;
+                return { total, targetTotal, targetPlace, placeCount, groundedCount, placeRatio, score, ok: total === targetTotal && ratioOk && placeCount === targetPlace && groundedCount >= targetPlace };
+            };
+            let stats = mixStats(parsed.posts);
+            if (!stats.ok && stats.total > 0) {
+                toastWarn(`피드 비율 조정 중… 장소 ${stats.placeCount}/${stats.targetPlace}개`);
+                const correctionPrompt = `${prompt}\n\n[비율 교정]\n총 ${stats.targetTotal}개를 정확히 출력한다. source:\"place\"는 정확히 ${stats.targetPlace}개, 나머지는 정확히 ${stats.targetTotal - stats.targetPlace}개다. ${groundedFacts.length ? `place 글 ${stats.targetPlace}개 모두 GOOGLE_PLACE_FACTS의 실제 정보를 사용하고 올바른 factIds를 넣는다.` : 'place 글은 현재 장소 자체나 저장된 장소 맥락을 구체적으로 다룬다.'} 말투와 시작 표현을 서로 반복하지 않는다.`;
+                const retryResult = await callLLM(correctionPrompt, { maxTokens: gen.maxTokens });
+                if (!chatGuard()) { toastWarn('채팅이 바뀌어 생성 결과를 저장하지 않았습니다.'); return false; }
+                const retryParsed = parseLLMJson(retryResult || '');
+                const retryStats = mixStats(retryParsed?.posts);
+                if (Array.isArray(retryParsed?.posts) && retryStats.total > 0 && (retryStats.ok || retryStats.score < stats.score)) {
+                    result = retryResult;
+                    parsed = retryParsed;
+                    stats = retryStats;
                 }
             }
             if (parsed.posts.length === 0) {
@@ -5844,13 +5634,22 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                     avatar: this._firstGrapheme(r.avatar || '👤'),
                     text: this._plainText(r.text, 200),
                 })) : [];
+                const factIds = Array.isArray(p.factIds) ? p.factIds.slice(0, 12).map(id => this._plainText(id, 20)).filter(Boolean) : [];
+                const usesVerifiedFact = factIds.some(id => validFactIds.has(id));
+                const source = usesVerifiedFact
+                    ? 'place'
+                    : ['place', 'chat', 'local', 'animal'].includes(p.source) ? p.source : (p.type === 'animal' ? 'animal' : 'local');
                 return {
                     name: this._plainText(p.name || 'Unknown', 60),
                     handle: this._plainText(p.handle || '', 60),
                     avatar: this._firstGrapheme(p.avatar || '👤'),
                     type: ['anon', 'animal'].includes(p.type) ? p.type : 'anon',
+                    source,
                     mood: this._plainText(p.mood || '', 30),
                     moodLabel: this._plainText(p.moodLabel || '', 40),
+                    imagePrompt: '',
+                    photoSource: '',
+                    factIds,
                     text: safeText,
                     mentions,
                     hashtags,
@@ -5862,6 +5661,14 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                 window._wtLastErrorType = 'no_valid_posts';
                 toastWarn('⚠️ 유효한 커뮤니티 글이 없어 기존 피드를 유지합니다.');
                 return false;
+            }
+            if (enrichMode === 'grounding' && groundedFacts.length) {
+                this._attachGroundedPhotoPrompts(cleanPosts, {
+                    canonicalName: groundedCanonicalName,
+                    region: groundedRegion,
+                    facts: groundedFacts,
+                    photoCues: groundedPhotoCues,
+                });
             }
             if (!chatGuard()) { toastWarn('채팅이 바뀌어 생성 결과를 저장하지 않았습니다.'); return false; }
 
@@ -5929,6 +5736,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
             <button id="wt-comm-fab" style="position:absolute;bottom:20px;right:16px;width:52px;height:52px;border-radius:50%;background:#1D9BF0;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 2px 12px rgba(29,155,240,.4);display:flex;align-items:center;justify-content:center;touch-action:manipulation">✨</button>
         </div>`);
         $('body').append(overlay);
+        this._prepareCommunityPhotos(overlay[0]);
         const self = this;
         const close = () => {
             // r20: 즉시 제거 (애니메이션 없음)
@@ -5964,6 +5772,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
             const posts = loc?.community || [];
             const postsHtml = posts.length ? posts.map(p => self._renderCommunityPostCard(p, locId)).join('') : '<div style="padding:60px 20px;text-align:center;color:#8B98A5;font-size:13px">아직 반응이 없어요<br><span style="font-size:11px">✨ 버튼을 눌러 실시간 반응을 생성해보세요</span></div>';
             overlay.find('#wt-comm-feed').html(postsHtml);
+            self._prepareCommunityPhotos(overlay.find('#wt-comm-feed')[0]);
             overlay.find('[data-comm-count]').html(`<span style="width:8px;height:8px;background:#00BA7C;border-radius:50%;display:inline-block;animation:wtLivePulse 2s infinite"></span> 실시간 · ${posts.length}개 반응`);
             return true;
         };
@@ -6227,7 +6036,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
         const size = s?.genSize || 'normal';
         if (size === 'light') {
             return {
-                community: { min: 4, max: 5, label: '4~5개', minImages: 2, maxTokens: 4096 },
+                community: { min: 5, max: 5, label: '5개', minImages: 2, maxTokens: 4096 },
                 review:    { min: 2, max: 3, maxTokens: 3072 },
             };
         }
@@ -6239,7 +6048,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
         }
         // normal (default)
         return {
-            community: { min: 7, max: 9, label: '7~9개', minImages: 4, maxTokens: 8192 },
+            community: { min: 8, max: 9, label: '8~9개', minImages: 4, maxTokens: 8192 },
             review:    { min: 3, max: 5, maxTokens: 4096 },
         };
     }
@@ -6403,6 +6212,188 @@ Respond with ONLY a JSON object, no markdown, no explanation:
         return `<div class="wt-pin-btn" data-pin-locid="${loc.id}" data-pin-kind="${kind}"${extraData} style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;cursor:pointer;font-weight:${on ? '700' : '400'};color:${on ? '#1D9BF0' : '#536471'}">📌 ${on ? '반영중' : '반영'}</div>`;
     }
 
+    _safePublicPhotoText(value, maxLength = 180) {
+        const text = this._plainText(value, Math.max(40, Math.min(240, maxLength)))
+            .replace(/[#@][A-Za-z0-9_가-힣]+/g, ' ')
+            .replace(/\b(?:https?:\/\/|www\.|javascript:|data:)/ig, ' ')
+            .replace(/[^\p{L}\p{N}\s,.'()/-]/gu, ' ')
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+        if (text.length < 4) return '';
+        if (/(?:api[_-]?key|private[_-]?key|authorization|bearer|access[_-]?token|refresh[_-]?token|client[_-]?secret|system\s+prompt|ignore\s+(?:all\s+)?previous|sk-[A-Za-z0-9]|AIza[0-9A-Za-z_-]{10,})/i.test(text)) return '';
+        return text.slice(0, maxLength);
+    }
+
+    _safeCommunityImagePrompt(value, post = {}) {
+        const source = post?.source || (post?.type === 'animal' ? 'animal' : '');
+        if (source !== 'place') return '';
+        const text = this._safePublicPhotoText(value, 180);
+        if (text.length < 12) return '';
+        return text;
+    }
+
+    _attachGroundedPhotoPrompts(posts, publicContext = {}) {
+        if (!Array.isArray(posts) || !posts.length) return;
+        const facts = Array.isArray(publicContext.facts) ? publicContext.facts : [];
+        const factMap = new Map(facts.map(fact => [String(fact.id || ''), this._safePublicPhotoText(fact.text, 150)]));
+        const placeLabel = this._safePublicPhotoText(publicContext.canonicalName, 100);
+        const region = this._safePublicPhotoText(publicContext.region, 100);
+        const cuePool = (Array.isArray(publicContext.photoCues) ? publicContext.photoCues : [])
+            .map(cue => this._safePublicPhotoText(cue, 160))
+            .filter(Boolean);
+        const fallbackFacts = facts.map(fact => this._safePublicPhotoText(fact.text, 150)).filter(Boolean);
+        const candidates = posts.filter(post => post?.source === 'place');
+        if (!candidates.length || (!cuePool.length && !fallbackFacts.length)) return;
+        const target = Math.min(4, candidates.length, Math.max(2, Math.round(candidates.length * 0.45)));
+        for (let index = 0; index < target; index++) {
+            const post = candidates[index];
+            const linkedFact = (post.factIds || []).map(id => factMap.get(String(id))).find(Boolean);
+            const cue = cuePool[index % Math.max(1, cuePool.length)] || linkedFact || fallbackFacts[index % fallbackFacts.length];
+            const subject = [placeLabel, region].filter(Boolean).join(' in ') || 'a verified public place';
+            post.imagePrompt = this._safeCommunityImagePrompt(
+                `documentary phone photo of ${subject}, ${linkedFact || cue}, authentic local atmosphere`,
+                { source: 'place' },
+            );
+            post.photoSource = post.imagePrompt ? 'grounded_public_v1' : '';
+        }
+    }
+
+    _communityPhotoUrl(post, loc) {
+        if (post?.photoSource !== 'grounded_public_v1') return '';
+        const prompt = this._safeCommunityImagePrompt(post?.imagePrompt, post);
+        if (!prompt) return '';
+        const seedBase = `${loc?.id || ''}:${post?.id || ''}:${post?.text || ''}`;
+        let seed = 0;
+        for (let i = 0; i < seedBase.length; i++) seed = ((seed * 31) + seedBase.charCodeAt(i)) >>> 0;
+        const finalPrompt = `${prompt}, realistic casual phone photo, social media snapshot, natural light, no text, no watermark`;
+        const url = new URL(`https://image.pollinations.ai/prompt/${encodeURIComponent(finalPrompt)}`);
+        url.searchParams.set('width', '768');
+        url.searchParams.set('height', '432');
+        url.searchParams.set('seed', String(seed || 1));
+        url.searchParams.set('model', 'flux');
+        url.searchParams.set('nologo', 'true');
+        url.searchParams.set('private', 'true');
+        url.searchParams.set('safe', 'true');
+        url.searchParams.set('enhance', 'false');
+        return url.toString();
+    }
+
+    _validatedCommunityPhotoUrl(value) {
+        try {
+            const url = new URL(String(value || ''));
+            if (url.origin !== 'https://image.pollinations.ai' || !url.pathname.startsWith('/prompt/')) return '';
+            const allowed = new Set(['width', 'height', 'seed', 'model', 'nologo', 'private', 'safe', 'enhance']);
+            for (const key of url.searchParams.keys()) if (!allowed.has(key)) return '';
+            return url.toString();
+        } catch (_) {
+            return '';
+        }
+    }
+
+    _prepareCommunityPhotos(root) {
+        if (!root?.querySelectorAll) return;
+        const images = root.querySelectorAll('img.wt-community-photo[data-photo-url]:not([data-photo-bound])');
+        if (!images.length) return;
+        const start = image => {
+            if (!image?.isConnected || image.dataset.photoStarted === '1') return;
+            image.dataset.photoStarted = '1';
+            const url = this._validatedCommunityPhotoUrl(image.dataset.photoUrl);
+            if (!url) {
+                image.closest('.wt-community-photo-wrap')?.remove();
+                return;
+            }
+            const status = image.closest('.wt-community-photo-wrap')?.querySelector('.wt-community-photo-status');
+            this._getCommunityPhotoBlob(url).then(blob => {
+                if (!image.isConnected) return;
+                if (!blob) {
+                    image.closest('.wt-community-photo-wrap')?.remove();
+                    return;
+                }
+                const objectUrl = URL.createObjectURL(blob);
+                image.onload = () => {
+                    URL.revokeObjectURL(objectUrl);
+                    image.style.opacity = '1';
+                    image.style.display = 'block';
+                    if (status) status.remove();
+                };
+                image.onerror = () => {
+                    URL.revokeObjectURL(objectUrl);
+                    image.closest('.wt-community-photo-wrap')?.remove();
+                };
+                image.src = objectUrl;
+            });
+        };
+        if (!this._communityPhotoObserver && typeof IntersectionObserver === 'function') {
+            this._communityPhotoObserver = new IntersectionObserver(entries => {
+                for (const entry of entries) {
+                    if (!entry.isIntersecting) continue;
+                    this._communityPhotoObserver.unobserve(entry.target);
+                    start(entry.target);
+                }
+            }, { rootMargin: '240px 0px' });
+        }
+        for (const image of images) {
+            image.dataset.photoBound = '1';
+            if (this._communityPhotoObserver) this._communityPhotoObserver.observe(image);
+            else start(image);
+        }
+    }
+
+    _getCommunityPhotoBlob(url) {
+        if (this._communityPhotoBlobCache.has(url)) return Promise.resolve(this._communityPhotoBlobCache.get(url));
+        if (this._communityPhotoPending.has(url)) return this._communityPhotoPending.get(url);
+        const promise = new Promise(resolve => {
+            this._communityPhotoQueue.push({ url, resolve });
+            this._drainCommunityPhotoQueue();
+        }).finally(() => this._communityPhotoPending.delete(url));
+        this._communityPhotoPending.set(url, promise);
+        return promise;
+    }
+
+    async _drainCommunityPhotoQueue() {
+        if (this._communityPhotoBusy) return;
+        this._communityPhotoBusy = true;
+        try {
+            while (this._communityPhotoQueue.length) {
+                const task = this._communityPhotoQueue.shift();
+                let blob = null;
+                for (let attempt = 0; attempt < 2 && !blob; attempt++) {
+                    const waitMs = Math.max(0, this._communityPhotoNextAt - Date.now());
+                    if (waitMs) await new Promise(resolve => setTimeout(resolve, waitMs));
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), 60000);
+                    try {
+                        const response = await fetch(task.url, {
+                            method: 'GET',
+                            credentials: 'omit',
+                            referrerPolicy: 'no-referrer',
+                            cache: 'force-cache',
+                            signal: controller.signal,
+                        });
+                        this._communityPhotoNextAt = Date.now() + 5500;
+                        if (response.ok) {
+                            const candidate = await response.blob();
+                            if (/^image\/(?:jpeg|png|webp)$/i.test(candidate.type) && candidate.size > 0 && candidate.size <= 8 * 1024 * 1024) blob = candidate;
+                        } else if (![429, 503].includes(response.status)) {
+                            break;
+                        }
+                    } catch (_) {
+                        this._communityPhotoNextAt = Date.now() + 5500;
+                    } finally {
+                        clearTimeout(timer);
+                    }
+                }
+                if (blob) {
+                    if (this._communityPhotoBlobCache.size >= 24) this._communityPhotoBlobCache.delete(this._communityPhotoBlobCache.keys().next().value);
+                    this._communityPhotoBlobCache.set(task.url, blob);
+                }
+                task.resolve(blob);
+            }
+        } finally {
+            this._communityPhotoBusy = false;
+        }
+    }
+
     _renderCommunityPostCard(p, locId) {
         const loc = locId ? this.lm.locations.find(l => l.id === locId) : null;
         const moodColors = {
@@ -6415,6 +6406,11 @@ Respond with ONLY a JSON object, no markdown, no explanation:
         const moodStyle = moodColors[p.mood] || 'background:#F7F9F9;color:#536471';
         // v0.9.0: 아바타 정규화 — 이모지 2~3개 겹친 거("🍯🦡", "1️⃣4️⃣1️⃣") 터지지 않도록 첫 grapheme만 사용
         const avatarChar = this._firstGrapheme(p.avatar || (p.type === 'animal' ? '🐾' : '👤'));
+        const photoUrl = this._communityPhotoUrl(p, loc);
+        const photoHtml = photoUrl ? `<div class="wt-community-photo-wrap" style="margin:8px 0 6px;border:1px solid #EFF3F4;border-radius:14px;overflow:hidden;background:#F7F9F9;aspect-ratio:16/9;position:relative">
+                    <div class="wt-community-photo-status" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#8B98A5;font-size:11px">사진 불러오는 중…</div>
+                    <img class="wt-community-photo" data-photo-url="${this._escapeHtml(photoUrl)}" referrerpolicy="no-referrer" alt="" style="display:block;width:100%;height:100%;object-fit:cover;background:#EFF3F4;opacity:0;transition:opacity .2s">
+                </div>` : '';
         // v0.9.0: 답글 렌더링 (트위터 스타일 — 왼쪽 살짝 들여쓰기 + 가는 선)
         const replies = Array.isArray(p.replies) ? p.replies : [];
         const repliesHtml = replies.length ? `<div style="margin-top:8px;margin-left:-4px;border-left:2px solid #EFF3F4;padding-left:10px">
@@ -6442,6 +6438,7 @@ Respond with ONLY a JSON object, no markdown, no explanation:
                 </div>
                 ${p.moodLabel ? `<div style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:14px;font-size:11px;font-weight:600;margin-bottom:6px;${moodStyle}">${this._escapeHtml(p.moodLabel)}</div>` : ''}
                 <div style="font-size:14px;color:#0F1419;line-height:1.55;margin-bottom:4px;word-break:break-word">${this._renderCommunityText(p.text)}</div>
+                ${photoHtml}
                 <div style="display:flex;gap:8px;margin-top:4px;margin-left:-8px">
                     <div style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;color:#536471;cursor:pointer">💬 ${replies.length}</div>
                     <div style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;color:#536471;cursor:pointer">🔁 0</div>
