@@ -1,12 +1,13 @@
-// 🐾 Paw Map — llm-helper.js (Hybrid: Connection Profile + Direct API)
-// v0.9.51: llmMode='profile'(기본, ST 연결 프로필) | 'direct'(API 키 직접 호출 + Grounding/폴백 체인)
+// 🐾 Paw Map — llm-helper.js (Connection Profile + Vertex AI Express)
+// v0.9.55: llmMode='profile'(ST 연결 프로필) | 'direct'(Vertex Express 키 + Google Search)
 // 동의 시스템(externalAiEnabled/shareRpData)은 두 모드 모두에 적용됨
 
 import { getContext, extension_settings } from '../../../extensions.js';
 import { EXTENSION_NAME } from './index.js';
 import { redactOutboundSecrets } from './secret-redaction.js';
+import { getVertexApiKey, maskVertexApiKey } from './vertex-key-store.js';
 
-const dbg = (...a) => console.log(`[${EXTENSION_NAME}]`, ...a);
+const dbg = () => {};
 
 let _requestInFlight = false;
 
@@ -43,14 +44,13 @@ async function _resolveConnectionService() {
 export async function preflightLLM(options = {}) {
     const s = _settings();
     const sensitive = options.sensitive !== false;
-    if (s.externalAiEnabled !== true) return { ok: false, error: '외부 AI 기능이 꺼져 있음 (설정에서 켜주세요)' };
-    if (sensitive && s.shareRpData !== true) return { ok: false, error: 'RP 원문 공유 동의가 꺼져 있음 (설정에서 켜주세요)' };
+    if (s.externalAiEnabled !== true || (sensitive && s.shareRpData !== true)) return { ok: false, error: 'AI 기능 사용이 꺼져 있음 (설정에서 켜주세요)' };
     if (_requestInFlight) return { ok: false, error: '이미 확장 AI 요청이 진행 중' };
 
     if ((s.llmMode || 'profile') === 'direct') {
         // direct 모드: API 키 설정만 확인 (프로필 불필요)
         const cfg = _getApiConfig();
-        if (!cfg) return { ok: false, error: 'API 키가 설정되지 않음 (설정 → 🔑 LLM API)' };
+        if (!cfg) return { ok: false, error: 'Vertex 키가 설정되지 않음 (설정 → AI 기능 → Vertex 키)' };
         return { ok: true };
     }
     // profile 모드
@@ -91,104 +91,15 @@ async function _callViaConnectionProfile(profileId, prompt, requestedTokens = 20
     }
 }
 
-// ========== ST API 설정 읽기 ==========
+// ========== Vertex AI Express 설정 읽기 ==========
 function _getApiConfig() {
     try {
-        // ★ 1순위: 우리 확장 설정에 저장된 API 키
         const s = extension_settings?.[EXTENSION_NAME];
-        // ★ Vertex AI: SA JSON 또는 API 키 (자동 판별)
-        if (s?.llmProvider === 'vertex') {
-            const model = s.llmModel || 'gemini-2.0-flash';
-            // 우선 SA JSON 체크 (풀 권한)
-            if (s?.vertexSaJson) {
-                const sa = _parseServiceAccount(s.vertexSaJson);
-                if (sa) {
-                    const region = s.vertexRegion || 'us-central1';
-                    dbg('🔧 LLM using Vertex AI (SA):', sa.project_id, region, model);
-                    return { type: 'vertex', sa, region, model };
-                }
-            }
-            // SA JSON 없거나 파싱 실패 → API 키 방식으로 폴백
-            if (s?.llmApiKey) {
-                dbg('🔧 LLM using Vertex AI (API key):', model);
-                return { type: 'vertex_key', key: s.llmApiKey, model };
-            }
-            dbg('⚠️ Vertex: neither SA JSON nor API key set');
-            return null;
-        }
-        if (s?.llmApiKey) {
-            const provider = s.llmProvider || 'google';
-            const model = s.llmModel || (provider === 'google' ? 'gemini-2.0-flash' : provider === 'openai' ? 'gpt-4o-mini' : '');
-            let type = provider, url = null;
-            if (provider === 'openrouter') { type = 'openai'; url = 'https://openrouter.ai/api/v1'; }
-            else if (provider === 'openai') { url = 'https://api.openai.com/v1'; }
-            dbg('🔧 LLM using extension key:', provider, model);
-            return { type, key: s.llmApiKey, model, url };
-        }
-
-        let type = null, key = null, model = null, url = null;
-
-        // ★ 여러 경로에서 API 키 탐색 (window.oai 등 안전 접근)
-        const _oai = (typeof window !== 'undefined' && window.oai) || {};
-        const _chatCompletion = (typeof window !== 'undefined' && window.chat_completion_source) || (typeof window !== 'undefined' && window.chatCompletion) || null;
-        const _mainApi = (typeof window !== 'undefined' && window.main_api) || null;
-
-        // Google (Gemini)
-        const gKey = _oai.api_key_makersuite
-            || (typeof window !== 'undefined' && window.api_key_makersuite)
-            || document.getElementById('api_key_makersuite')?.value
-            || '';
-        const gModel = _oai.google_model
-            || (typeof window !== 'undefined' && window.google_model)
-            || document.getElementById('model_google_select')?.value
-            || 'gemini-2.0-flash';
-
-        // OpenAI
-        const oKey = _oai.api_key_openai
-            || (typeof window !== 'undefined' && window.api_key_openai)
-            || document.getElementById('api_key_openai')?.value
-            || '';
-
-        // OpenRouter
-        const orKey = _oai.api_key_openrouter
-            || (typeof window !== 'undefined' && window.api_key_openrouter)
-            || document.getElementById('api_key_openrouter')?.value
-            || '';
-
-        dbg('🔧 LLM keys found:', {
-            google: gKey ? '✅ (' + gKey.substring(0, 8) + '...)' : '❌',
-            openai: oKey ? '✅' : '❌',
-            openrouter: orKey ? '✅' : '❌',
-            gModel,
-        });
-
-        // Google 우선 (유저가 Gemini 사용)
-        if (gKey && (_chatCompletion === 'makersuite' || _mainApi === 'openai')) {
-            type = 'google'; key = gKey; model = gModel;
-        }
-        // 명시적 Google 체크 (chatCompletion 없어도)
-        else if (gKey) {
-            type = 'google'; key = gKey; model = gModel;
-        }
-        // OpenAI
-        else if (oKey && (_chatCompletion === 'openai' || !_chatCompletion)) {
-            type = 'openai'; key = oKey;
-            model = _oai.openai_model || 'gpt-4o-mini';
-            url = _oai.openai_reverse_proxy || 'https://api.openai.com/v1';
-        }
-        // OpenRouter
-        else if (orKey) {
-            type = 'openai'; key = orKey;
-            model = _oai.openrouter_model || '';
-            url = 'https://openrouter.ai/api/v1';
-        }
-
-        if (!type || !key) {
-            dbg('⚠️ LLM: no API key found, fallback');
-            return null;
-        }
-        dbg('🔧 LLM selected:', type, model);
-        return { type, key, model, url };
+        const key = getVertexApiKey();
+        if (!key) return null;
+        const model = String(s?.llmModel || 'gemini-3.7-flash').trim() || 'gemini-3.7-flash';
+        dbg('🔧 LLM using Vertex AI Express:', model, maskVertexApiKey());
+        return { type: 'vertex_key', key, model };
     } catch(e) {
         dbg('⚠️ LLM config error:', e.message);
         return null;
@@ -225,7 +136,6 @@ async function _callGoogle(key, model, prompt) {
             });
             if (res.ok) {
                 const data = await res.json();
-                dbg('🔧 Google raw:', JSON.stringify(data).substring(0, 300));
                 const parts = data?.candidates?.[0]?.content?.parts || [];
                 // ★ JSON으로 시작하는 part 우선 선택 (RP 텍스트 part 거부)
                 for (const part of parts) {
@@ -440,7 +350,6 @@ async function _callVertex(sa, region, model, prompt) {
         });
         if (res.ok) {
             const data = await res.json();
-            dbg('🔧 Vertex raw:', JSON.stringify(data).substring(0, 300));
             const parts = data?.candidates?.[0]?.content?.parts || [];
             for (const part of parts) {
                 if (part.text && part.text.trim().startsWith('{')) {
@@ -505,6 +414,7 @@ function _parseServiceAccount(jsonStr) {
 // 서비스 계정 JSON 없이 짧은 API 키로 호출 — 2026년 정식 지원
 // 엔드포인트는 AI Studio와 달리 project/location 없음, 헤더로 인증
 async function _callVertexApiKey(apiKey, model, prompt) {
+    const useGrounding = !!window._wtUseGrounding;
     const endpoint = `https://aiplatform.googleapis.com/v1/publishers/google/models/${model}:generateContent`;
     const _fetch = (body) => {
         const ctrl = new AbortController();
@@ -520,8 +430,9 @@ async function _callVertexApiKey(apiKey, model, prompt) {
         }).finally(() => clearTimeout(timer));
     };
 
-    // 1차: JSON 강제
-    try {
+    // 1차: JSON 강제. Google 검색을 켠 경우에는 검색 없는 1차 호출을
+    // 건너뛰어 실제 Grounding 요청이 반드시 실행되게 한다.
+    if (!useGrounding) try {
         const res = await _fetch({
             systemInstruction: { parts: [{ text: 'You are a JSON-only assistant. Respond with valid JSON only.' }] },
             contents: [{ parts: [{ text: prompt }] }],  // v0.8.2: role 제거 (Vertex Express 호환)
@@ -529,7 +440,6 @@ async function _callVertexApiKey(apiKey, model, prompt) {
         });
         if (res.ok) {
             const data = await res.json();
-            dbg('🔧 Vertex(key) raw:', JSON.stringify(data).substring(0, 300));
             const parts = data?.candidates?.[0]?.content?.parts || [];
             for (const part of parts) {
                 if (part.text && part.text.trim().startsWith('{')) {
@@ -546,12 +456,18 @@ async function _callVertexApiKey(apiKey, model, prompt) {
             window._wtLastLLMError = `Vertex(key): Response OK but no JSON. finish_reason=${data?.candidates?.[0]?.finishReason || '?'}`;
             dbg(`⚠️ Vertex(key) JSON mode: response OK but no JSON parts (${parts.length} parts)`);
         } else {
-            const errBody = await res.text().catch(() => '');
+            const errBody = redactOutboundSecrets(await res.text().catch(() => ''));
             // v0.8.2: HTTP 에러 전체 보존 — 디버그 모달에 표시
             window._wtLastLLMError = `Vertex(key) HTTP ${res.status}: ${errBody.substring(0, 400)}`;
             dbg(`⚠️ Vertex(key) JSON mode: ${res.status} ${errBody.substring(0, 300)}`);
+            if ([401, 403, 404].includes(res.status)) {
+                const fatal = new Error(`Vertex(key) API ${res.status}: 키 권한과 모델명을 확인해주세요.`);
+                fatal.name = 'VertexFatalError';
+                throw fatal;
+            }
         }
     } catch(e) {
+        if (e?.name === 'VertexFatalError') throw e;
         window._wtLastLLMError = `Vertex(key) fetch error: ${e.message}`;
         dbg(`⚠️ Vertex(key) JSON mode error: ${e.message}`);
     }
@@ -563,13 +479,13 @@ async function _callVertexApiKey(apiKey, model, prompt) {
             generationConfig: { temperature: (window._wtTempOverride ?? 0.7), maxOutputTokens: (window._wtMaxTokensOverride ?? 4096) },
         };
         // v0.8.2: Grounding 지원 (Vertex AI)
-        if (window._wtUseGrounding) {
+        if (useGrounding) {
             body2.tools = [{ googleSearch: {} }];  // Vertex는 googleSearch (Gemini API와 다름)
             dbg('🔍 Vertex(key) Grounding enabled');
         }
         const res2 = await _fetch(body2);
         if (!res2.ok) {
-            const errBody2 = await res2.text().catch(() => '');
+            const errBody2 = redactOutboundSecrets(await res2.text().catch(() => ''));
             window._wtLastLLMError = `Vertex(key) 2nd attempt HTTP ${res2.status}: ${errBody2.substring(0, 400)}`;
             throw new Error(`Vertex(key) API ${res2.status}: ${res2.statusText}`);
         }
@@ -696,7 +612,6 @@ export async function callLLM(prompt, options = {}) {
             const result = await _callViaConnectionProfile(s.selectedProfile, String(prompt || ''), maxTokens, options.timeoutMs);
             window._wtLastApiStatus = `Connection profile used: ${s.selectedProfile}`;
             if (result) {
-                window._wtLastRawResponse = result;
                 // 프로필 = 메인 모델일 수 있어 RP 이어쓰기 위험 → 필터 적용
                 if (_isRpContinuation(result)) {
                     window._wtLastLLMError = 'Profile returned RP story (direct 모드 권장)';
@@ -742,15 +657,10 @@ async function _callDirect(prompt, options = {}) {
             // v0.9.51: 발신 프롬프트에도 시크릿 마스킹 적용 (GPT 보안 컨셉 유지)
             const outbound = redactOutboundSecrets(String(prompt || ''));
             let result = '';
-            if (cfg.type === 'google') result = await _callGoogleWithFallback(cfg.key, cfg.model, outbound);
-            else if (cfg.type === 'vertex') result = await _callVertex(cfg.sa, cfg.region, cfg.model, outbound);
-            else if (cfg.type === 'vertex_key') result = await _callVertexApiKey(cfg.key, cfg.model, outbound);
-            else if (cfg.type === 'openai') result = await _callOpenAI(cfg.key, cfg.model, outbound, cfg.url);
-            else if (cfg.type === 'claude') result = await _callClaude(cfg.key, cfg.model, outbound, cfg.url);
+            if (cfg.type === 'vertex_key') result = await _callVertexApiKey(cfg.key, cfg.model, outbound);
 
             if (result) {
                 dbg(`🔧 LLM direct OK (${result.length}c)`);
-                window._wtLastRawResponse = result;
                 return result;
             }
             if (!window._wtLastLLMError || window._wtLastLLMError === 'No API config detected — check 설정 → 🔑 LLM API 키 입력') {
@@ -758,7 +668,7 @@ async function _callDirect(prompt, options = {}) {
             }
             dbg('⚠️ LLM direct returned empty, lastErr:', window._wtLastLLMError);
         } catch(e) {
-            window._wtLastLLMError = `Direct API error: ${e.message}`;
+            window._wtLastLLMError = window._wtLastLLMError || `Direct API error: ${e.message}`;
             dbg('⚠️ LLM direct failed:', e.message);
         }
     } else {

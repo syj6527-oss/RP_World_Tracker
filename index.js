@@ -1,4 +1,4 @@
-// 🐶 PAW MAP v0.9.50-secure-beta
+// 🐶 PAW MAP v0.9.55-beta
 
 import { getContext, extension_settings } from '../../../extensions.js';
 import { eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';
@@ -127,15 +127,14 @@ function firstGrapheme(value, fallback = '👤') {
 const defaults = {
     // v0.9.51: Yun 확정 정책
     //   - 자동 감지 기본 OFF (후보함 시스템은 유지 — 켜면 후보함으로 격리됨)
-    //   - aiInjection 기본 ON (장소 컨텍스트 주입 = 확장의 핵심 기능)
-    //   - dragEvent 기본 ON (유일하게 유지하는 자동 입력 수단)
+    //   - AI 하위 기능은 통합 AI 동의가 켜진 경우에만 사용
     //   - llmMode: 'profile'(기본, ST 연결 프로필) | 'direct'(API 키 직접 입력)
     enabled:true, autoDetect:false, detectMode:'off', autoEvent:false, autoSchedule:false, showDetectToast:true,
-    aiInjection:true, memoryMode:'natural', memorySummaryDays:7, panelOpacity:100,
+    aiInjection:false, memoryMode:'natural', memorySummaryDays:7, panelOpacity:100,
     debugMode:false, mapMode:'leaflet', fantasyTheme:false,
-    eventLang:'auto', // auto=RP언어, ko=한국어, en=English
+    eventLang:'ko', // ko=한국어, en=영어
     worldContinuity:false, // 세계관 이어가기 (캐릭터 기반 저장)
-    dragEvent:true, // 드래그 → 이벤트 저장 (기본 ON)
+    dragEvent:false, // 드래그 → 이벤트 저장 (AI 기능 사용 아래의 선택 기능)
     // v0.9.46 security defaults: every potentially billable/private external action is opt-in.
     externalAiEnabled:false,
     shareRpData:false,
@@ -143,9 +142,10 @@ const defaults = {
     showGoogleLinks:false, // 구글 지도 바로가기 버튼 (설정 옵션) — Street View는 이 옵션과 무관하게 항상 표시
     mapSearchLanguage:'ko',
     openMapStyle:'liberty',
+    mapAppearance:'theme', // theme=ST 테마 따라가기, default=기본 지도
     llmMode:'profile', // v0.9.51: 'profile' | 'direct'
-    llmProvider:'google', llmModel:'gemini-2.5-flash', llmApiKey:'', vertexSaJson:'', vertexRegion:'',
-    locationEnrichment:'off', // off | overpass | grounding(direct+google 전용)
+    llmProvider:'vertex', llmModel:'gemini-3.7-flash',
+    locationEnrichment:'off', // off | overpass | grounding(direct+Vertex 전용)
 };
 
 let db, lm, det, pi, ui, detectionCandidates;
@@ -787,16 +787,28 @@ async function init() {
     for (const key of ['externalAiEnabled', 'shareRpData', 'allowAutoGeocoding', 'showGoogleLinks', 'autoEvent', 'autoSchedule', 'dragEvent', 'aiInjection']) {
         extension_settings[EXTENSION_NAME][key] = extension_settings[EXTENSION_NAME][key] === true;
     }
+    // 통합 AI 스위치가 꺼진 상태에서는 숨겨진 하위 기능이 남아 실행되지 않게 한다.
+    if (!(extension_settings[EXTENSION_NAME].externalAiEnabled === true && extension_settings[EXTENSION_NAME].shareRpData === true)) {
+        extension_settings[EXTENSION_NAME].autoEvent = false;
+        extension_settings[EXTENSION_NAME].autoSchedule = false;
+        extension_settings[EXTENSION_NAME].dragEvent = false;
+        extension_settings[EXTENSION_NAME].aiInjection = false;
+    }
     if (!['off', 'confirm', 'auto'].includes(extension_settings[EXTENSION_NAME].detectMode)) {
         extension_settings[EXTENSION_NAME].detectMode = 'off';
         extension_settings[EXTENSION_NAME].autoDetect = false;
     }
-    // v0.9.51: grounding은 direct 모드 + google 프로바이더에서만 유효 (아니면 off로 강등)
+    // v0.9.55: 직접 키 방식은 Vertex AI Express 하나만 사용한다.
+    extension_settings[EXTENSION_NAME].llmProvider = 'vertex';
+    if (!String(extension_settings[EXTENSION_NAME].llmModel || '').trim()) {
+        extension_settings[EXTENSION_NAME].llmModel = 'gemini-3.7-flash';
+    }
+    // Grounding은 direct 모드 + Vertex에서만 유효하다.
     if (!['off', 'overpass', 'grounding'].includes(extension_settings[EXTENSION_NAME].locationEnrichment)) {
         extension_settings[EXTENSION_NAME].locationEnrichment = 'off';
     }
     if (extension_settings[EXTENSION_NAME].locationEnrichment === 'grounding'
-        && (extension_settings[EXTENSION_NAME].llmMode !== 'direct' || extension_settings[EXTENSION_NAME].llmProvider !== 'google')) {
+        && extension_settings[EXTENSION_NAME].llmMode !== 'direct') {
         extension_settings[EXTENSION_NAME].locationEnrichment = 'off';
     }
     if (!['profile', 'direct'].includes(extension_settings[EXTENSION_NAME].llmMode)) {
@@ -805,6 +817,14 @@ async function init() {
     if (!['liberty', 'bright', 'dark'].includes(extension_settings[EXTENSION_NAME].openMapStyle)) {
         extension_settings[EXTENSION_NAME].openMapStyle = 'liberty';
     }
+    if (!extension_settings[EXTENSION_NAME]._mapAppearanceMigration0955) {
+        extension_settings[EXTENSION_NAME].mapAppearance = extension_settings[EXTENSION_NAME].openMapStyle === 'dark' ? 'theme' : 'default';
+        extension_settings[EXTENSION_NAME]._mapAppearanceMigration0955 = true;
+    }
+    if (!['theme', 'default'].includes(extension_settings[EXTENSION_NAME].mapAppearance)) {
+        extension_settings[EXTENSION_NAME].mapAppearance = 'theme';
+    }
+    extension_settings[EXTENSION_NAME].eventLang = extension_settings[EXTENSION_NAME].eventLang === 'en' ? 'en' : 'ko';
     extension_settings[EXTENSION_NAME].mapSearchLanguage = extension_settings[EXTENSION_NAME].mapSearchLanguage === 'en' ? 'en' : 'ko';
     extension_settings[EXTENSION_NAME].debugMode = false;
     // 구버전 마이그레이션 표식은 유지하되 v0.9.49 복구값을 다시 덮지 않는다.

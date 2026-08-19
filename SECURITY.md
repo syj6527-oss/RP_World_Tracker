@@ -1,21 +1,22 @@
-# PAW MAP 보안 메모 — v0.9.50-secure-beta
+# PAW MAP 보안 메모 — v0.9.55-beta
 
 ## 보호 목표
 
-1. 확장이 API 키 또는 서비스 계정 비밀을 소유하지 않는다.
-2. 과금 가능한 AI 호출은 사용자 동의와 선택한 연결 프로필 없이는 실행되지 않는다.
+1. 서비스 계정 JSON·개인키를 받지 않고, 선택형 Vertex Express 키를 PAW MAP 설정·DB·백업·진단 정보와 분리한다.
+2. 사용량이 발생할 수 있는 AI 호출은 사용자 동의와 선택한 연결 프로필 또는 Vertex 키 없이는 실행되지 않는다.
 3. 감지된 채팅/RP 장소명은 기본 상태에서 지도 검색 서비스로 전송되지 않는다.
 4. 채팅, 프롬프트, 모델 원문 응답을 콘솔이나 진단 복사본에 남기지 않는다.
 5. 모델이 반환한 HTML, URL, 이벤트 속성을 실행하지 않는다.
 6. 확인 모드의 미승인 후보와 오탐 필터에서 거부된 이름은 영구 데이터나 외부 요청으로 승격되지 않는다.
-7. Google 지도는 키 없는 사용자 클릭형 고정 URL만 허용한다.
+7. Google 지도·길찾기·Street View는 키 없는 사용자 클릭형 고정 URL만 허용한다.
 
 ## 적용된 통제
 
 - `externalAiEnabled`와 `shareRpData`가 모두 `true`일 때만 RP 기반 생성 요청 허용
-- AI 연결은 SillyTavern Connection Manager 프로필 하나만 사용
-- 직접 API 키, 키 탐색, 공급자 폴백, 자동 재시도 제거
-- 한 기능 실행당 연결 프로필 요청 1회, 최대 동시 요청 1개, 출력 토큰 8,192 상한
+- AI 연결은 SillyTavern Connection Manager 프로필 또는 사용자가 직접 저장한 Vertex AI Express 키만 사용
+- 직접 API 공급자는 Vertex 하나로 고정하고 Google Gemini·OpenAI·OpenRouter·Claude 키 입력과 공급자 전환 UI를 제거
+- Vertex 키는 현재 SillyTavern 주소의 브라우저 `localStorage`에만 보관하고 확장 설정·IndexedDB·백업·안전 진단에서 제외
+- 한 기능 실행당 AI 요청을 직렬화하고, 최대 동시 요청 1개와 출력 토큰 8,192 상한 적용
 - 일반 채팅 지도 맥락 주입은 최대 12,000자로 제한해 반복 입력 토큰 증가를 제한
 - 모든 연결 프로필 요청에 취소 가능한 타임아웃 적용
 - 연결 프로필로 보내는 임시 프롬프트 복사본에서 PEM 개인키, `sk-`, `AIza`, `AKIA`, `api_key`·`client_secret`·AWS 비밀키 할당, access/refresh/id token, Basic·Bearer 인증값을 한 번 더 마스킹하며 저장 원문은 변경하지 않음
@@ -24,7 +25,7 @@
 - `allowAutoGeocoding`이 `true`가 아니면 자동 Photon 검색 차단
 - 지도 검색은 등록 장소 결과가 없고 사용자가 Enter를 누른 경우에만 입력 문구를 Photon에 전송
 - 지도 꾹 누르기·핀 직접 이동은 사용자 조작으로 지정된 RP 좌표 하나만 Photon에 보내 역지오코딩하며, 채팅 원문·기기 위치는 보내지 않음
-- 구버전 `llmApiKey`, Vertex 서비스 계정 JSON 설정을 시작할 때마다 삭제
+- 구버전 `llmApiKey`, Vertex 서비스 계정 JSON 설정을 시작할 때마다 삭제하고 서비스 계정 JSON 입력은 지원하지 않음
 - 모든 LLM 커뮤니티/리뷰/NPC 출력은 저장 전 평문·길이 제한 적용
 - 드래그한 채팅 문구와 장소명은 이벤트 장소 선택창의 HTML에 넣기 전에 평문화·escape
 - 커뮤니티 본문 렌더링은 escape 후 멘션/해시태그만 자체 서식 적용
@@ -49,7 +50,7 @@
 - 의심 장소 정리는 자동 삭제가 아니라 사용자 선택과 재확인을 요구
 - 기존 군집 핀의 좌표·주소 초기화도 장소별 미선택 체크와 재확인을 요구하며 다른 기록은 보존
 - Google 링크는 `https://www.google.com/maps/` 고정 호스트와 `URL`/`URLSearchParams`로만 생성
-- Google 지도·Google 길찾기·Street View 버튼은 기본 OFF이며 사용자가 설정을 켠 경우에만 표시
+- Google 지도·Google 길찾기는 기본 OFF이며 사용자가 `구글맵 연동`을 켠 경우에만 표시. Street View는 확정 좌표가 있을 때 항상 표시
 - Google 길찾기는 RP의 저장된 출발지·목적지를 모두 요구하며 출발지를 생략하지 않음
 - Google 링크 새 창은 `noopener,noreferrer`로 열고 API 키·토큰·추적 파라미터를 추가하지 않음
 - Google URL은 동작별 파라미터 허용목록을 다시 검사하며 알 수 없는 경로·파라미터·중복 `api`·2,048자 초과 URL을 거부
@@ -64,6 +65,8 @@
 - Google 웹페이지 자체의 개인정보 처리, 쿠키, 검색/경로 기록은 PAW MAP이 통제하지 않습니다.
 - PAW MAP은 기기 위치를 URL에 넣지 않지만, 열린 Google 페이지의 위치 접근은 Google과 브라우저 권한 설정에 따릅니다.
 - SillyTavern의 다른 확장은 같은 페이지 권한으로 실행됩니다. 악성 확장에 대한 완전한 격리는 이 확장만으로 제공할 수 없습니다.
+- Vertex Express 키는 브라우저 로컬 저장소에 있으므로 같은 SillyTavern 주소에서 실행되는 다른 스크립트가 읽을 수 있습니다. 키 제한·사용량 한도·정기 교체가 필요합니다.
+- Vertex AI와 Google Search 보강을 쓰면 프롬프트·장소명과 일반 네트워크 메타데이터가 Google에 전달되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있습니다.
 - PAW MAP이 별도 결제 계정이나 카드를 연결하지는 않지만, 외부 AI를 켜면 선택한 연결 프로필 공급자 계정의 토큰·크레딧·사용량이 차감됩니다. 실제 청구와 보존 정책은 기존 SillyTavern/공급자 설정에 따릅니다.
 - IndexedDB와 내보낸 백업 JSON은 애플리케이션 수준에서 암호화하지 않습니다.
 - `계속 무시` 목록에는 정규화된 장소명이 평문으로 저장됩니다. 후보 근거와 채팅 원문은 저장하지 않습니다.
@@ -73,7 +76,7 @@
 
 배포 전 다음 문자열과 네트워크 호출을 확인합니다.
 
-- `apiKey`, `private_key`, `Authorization`, `x-goog-api-key`
+- `apiKey`, `private_key`, `Authorization`, `x-goog-api-key`, `paw-map.vertex-express-key.v1`
 - 연결 프로필 전송 직전 비밀값 마스킹과 일반 RP 문장 보존
 - `console.log`, `console.warn`, `console.error`
 - `innerHTML`/jQuery HTML 템플릿에 모델 출력이 직접 들어가는 경로
@@ -84,10 +87,12 @@
 - 등록 장소 결과가 없는 명시적 Enter에서만 Photon이 호출되는지, 부모 없는 `Room`·`방` 후보는 Photon으로 전송되지 않는지
 - 추정 핀이 30~150m 안에 있고 무작위로 재배치되지 않으며 Street View에 전달되지 않는지
 - `Drift point` 단독 메타가 이벤트 저장·AI 요청을 만들지 않는지
-- RP 경로가 세션에만 남고 외부 요청·DB 저장을 하지 않는지, Google 링크가 기본 OFF인지
+- RP 경로가 세션에만 남고 외부 요청·DB 저장을 하지 않는지, Google 지도·길찾기가 기본 OFF이며 Street View는 유지되는지
+- Vertex 키가 확장 설정·IndexedDB·백업·진단 문자열에 들어가지 않는지, 삭제 버튼으로 로컬 키가 제거되는지
+- Google Search 보강이 Vertex 키 모드에서만 활성화되고 요청 본문에 `googleSearch` 도구가 포함되는지
 - 커뮤니티 기본 생성은 Overpass 0회, 보강 생성은 확정 좌표에서만 Overpass 1회인지
 - `auto_update` 값
 
-자동 회귀 점검은 `node tests/security-regression.mjs`로 실행합니다.
+배포 전 모든 1차 JavaScript에 `node --check`를 실행하고, 위 문자열·호스트·비밀 포함 여부를 정적 검사합니다.
 
 보안 문제를 재현할 때도 실제 API 키나 채팅 원문을 이슈/로그에 첨부하지 마세요.

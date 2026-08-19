@@ -8,9 +8,32 @@ import { calculateRpRoute, rpRouteGeoJson } from './rp-route.js';
 
 const STYLE_URLS = Object.freeze({
     liberty: 'https://tiles.openfreemap.org/styles/liberty',
-    bright: 'https://tiles.openfreemap.org/styles/bright',
     dark: 'https://tiles.openfreemap.org/styles/dark',
 });
+
+function rgbBrightness(value) {
+    const match = String(value || '').match(/rgba?\(\s*(\d+)\D+(\d+)\D+(\d+)/i);
+    if (!match) return null;
+    const [, red, green, blue] = match.map(Number);
+    return (red * 299 + green * 587 + blue * 114) / 1000;
+}
+
+function usesDarkSillyTavernTheme() {
+    try {
+        const rootStyle = getComputedStyle(document.documentElement);
+        const bodyStyle = getComputedStyle(document.body);
+        const candidates = [
+            rootStyle.getPropertyValue('--SmartThemeBlurTintColor'),
+            rootStyle.getPropertyValue('--SmartThemeChatTintColor'),
+            bodyStyle.backgroundColor,
+        ];
+        for (const candidate of candidates) {
+            const brightness = rgbBrightness(candidate);
+            if (brightness != null) return brightness < 140;
+        }
+    } catch (_) {}
+    return false;
+}
 
 function validCoordinate(value, min, max) {
     if (value == null || String(value).trim() === '') return null;
@@ -71,8 +94,10 @@ export class LeafletRenderer {
         mapDiv.style.cssText = 'width:100%;height:100%;min-height:320px;position:relative;';
         this.container.appendChild(mapDiv);
 
-        const configuredStyle = String(extension_settings?.[EXTENSION_NAME]?.openMapStyle || 'liberty');
-        const style = STYLE_URLS[configuredStyle] || STYLE_URLS.liberty;
+        const appearance = String(extension_settings?.[EXTENSION_NAME]?.mapAppearance || 'theme');
+        const style = appearance === 'theme' && usesDarkSillyTavernTheme()
+            ? STYLE_URLS.dark
+            : STYLE_URLS.liberty;
 
         this._map = new gl.Map({
             container: mapDiv,

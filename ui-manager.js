@@ -10,6 +10,7 @@ import { MapRenderer } from './map-renderer.js';
 import { LeafletRenderer } from './leaflet-renderer.js';
 import { suspiciousLocationReason } from './detection-candidates.js';
 import { buildGoogleMapsUrl, openExternalMapUrl } from './google-maps-links.js';
+import { clearVertexApiKey, getVertexApiKey, maskVertexApiKey, saveVertexApiKey } from './vertex-key-store.js';
 
 const dbg = () => {};
 
@@ -304,7 +305,7 @@ export class UIManager {
     _openGoogleLink(action, locationId) {
         // v0.9.51: Street View는 옵션과 무관하게 항상 사용 가능 (Yun 정책)
         if (action !== 'streetview' && extension_settings[EXTENSION_NAME]?.showGoogleLinks !== true) {
-            toastWarn('설정에서 Google 지도 링크 표시를 먼저 켜주세요.');
+            toastWarn('설정에서 구글맵 연동을 먼저 켜주세요.');
             return;
         }
         const destination = this.lm.locations.find(location => location.id === locationId && location.verification !== 'candidate');
@@ -352,105 +353,85 @@ export class UIManager {
     createSettingsPanel() {
         const html = `<div id="wt-settings" class="wt-settings"><div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.50-secure-beta</span></b>
+                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.55-beta</span></b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div><div class="inline-drawer-content">
-                <div class="wt-s-row"><label><input type="checkbox" id="wt-s-enabled"/> 활성화</label></div>
-                <div class="wt-divider"></div>
-                <!-- v0.9.23: 장소 감지 모드 (끔/확인/자동) + 이벤트 자동 기록 -->
+                <div style="font-size:12px;font-weight:800;margin:2px 0 7px">기본 설정</div>
+                <div class="wt-s-row"><label><input type="checkbox" id="wt-s-enabled"/> PAW MAP 사용</label></div>
                 <div class="wt-s-row" style="display:none"><label><input type="checkbox" id="wt-s-detect"/> 🔍 자동 감지</label></div>
                 <div class="wt-s-row" style="display:flex;align-items:center;gap:6px" title="자동 모드는 강화된 오탐 필터를 통과한 장소를 즉시 등록하고, 좌표가 없으면 현재 장소 주변에 추정 핀을 만듭니다.">
                     <label style="white-space:nowrap">🔍 장소 감지</label>
                     <select id="wt-s-detectmode" class="text_pole wt-select" style="flex:1;font-size:11px">
-                        <option value="off">끔 (수동 등록만)</option>
+                        <option value="off">사용 안 함</option>
                         <option value="confirm">후보함에서 확인</option>
-                        <option value="auto">자동 감지·등록 (기본)</option>
+                        <option value="auto">바로 등록</option>
                     </select>
                 </div>
-                <div class="wt-s-row" title="새 메시지마다 선택한 연결 프로필을 호출할 수 있습니다"><label><input type="checkbox" id="wt-s-autoevent"/> 🪙 AI 이벤트 자동 기록 (연결 프로필 크레딧 사용)</label></div>
-                <div class="wt-s-row" title="약속 신호가 감지되면 선택한 연결 프로필을 호출할 수 있습니다"><label><input type="checkbox" id="wt-s-autoschedule"/> 🪙 AI 예정 일정 자동 기록 (연결 프로필 크레딧 사용)</label></div>
-                <div class="wt-s-row"><label><input type="checkbox" id="wt-s-toast"/> 📍 이동 알림</label></div>
-                <div class="wt-divider"></div>
-                <div class="wt-s-row" title="지도·이벤트·NPC 맥락이 일반 채팅 생성에 쓰는 AI 공급자로 전송되며 선택한 계정의 입력 토큰·크레딧 사용량이 늘 수 있습니다"><label><input type="checkbox" id="wt-s-inject"/> 🪙 지도 맥락을 일반 채팅 AI에 전송 (토큰 증가)</label></div>
-                <div class="wt-s-row"><label><input type="checkbox" id="wt-s-moveevent"/> 🐾 발자취 기록</label></div>
-                <!-- v0.9.2: 드래그 → 요약 아이콘(이벤트 기록) on/off -->
-                <div class="wt-s-row"><label><input type="checkbox" id="wt-s-dragevent"/> ✂️ 드래그 AI 요약 (수동 호출)</label></div>
-                <div class="wt-s-row"><label><span style="cursor:default">💭</span> 기억</label>
-                    <select id="wt-s-mem" class="text_pole wt-select"><option value="natural">🌿 자연</option><option value="perfect">💎 완벽</option></select>
+                <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:2px 8px;margin-top:4px">
+                    <div class="wt-s-row"><label><input type="checkbox" id="wt-s-toast"/> 📍 이동 알림</label></div>
+                    <div class="wt-s-row"><label><input type="checkbox" id="wt-s-moveevent"/> 🐾 발자취 기록</label></div>
+                    <div class="wt-s-row" title="감지된 장소명을 Photon에 보내 실제 좌표를 찾습니다"><label><input type="checkbox" id="wt-s-auto-geocode"/> 🌐 주소 자동 찾기</label></div>
+                    <div class="wt-s-row" title="Google 지도와 길찾기 버튼을 표시합니다. Street View는 항상 표시됩니다"><label><input type="checkbox" id="wt-s-google-links"/> 🗺️ 구글맵 연동</label></div>
+                    <div class="wt-s-row"><label><input type="checkbox" id="wt-s-worldcont"/> 🌍 세계관 이어가기</label></div>
+                </div>
+                <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;margin-top:5px">
+                    <label style="display:block;min-width:0;font-size:10px;font-weight:700">💭 기억<select id="wt-s-mem" class="text_pole wt-select" style="display:block;width:100%;font-size:10px;margin-top:2px"><option value="natural">자연스럽게</option><option value="perfect">모두 기억</option></select></label>
+                    <label style="display:block;min-width:0;font-size:10px;font-weight:700">🎨 지도 디자인<select id="wt-s-mapappearance" class="text_pole wt-select" style="display:block;width:100%;font-size:10px;margin-top:2px"><option value="theme">ST 테마 따라가기</option><option value="default">기본 지도</option></select></label>
                 </div>
                 <div class="wt-divider"></div>
-                <div style="padding:8px;border:1px solid rgba(246,169,58,.5);border-radius:8px;background:rgba(246,169,58,.08);font-size:10.5px;line-height:1.45;margin-bottom:6px">
-                    <b>🔒 외부 전송·과금 보호</b><br>
-                    지도 표시 시 OpenFreeMap에 화면 영역과 네트워크 정보가 전달됩니다. 직접 검색한 문구는 Photon으로 전송됩니다. 아래 AI 기능과 채팅 원문 공유는 기본 OFF입니다.
-                </div>
-                <div class="wt-s-row"><label><input type="checkbox" id="wt-s-external-ai"/> 🪙 외부 AI 호출 허용 (연결 프로필 크레딧 사용)</label></div>
-                <div class="wt-s-row"><label><input type="checkbox" id="wt-s-share-rp"/> 🔐 RP/채팅 내용을 선택한 AI 연결에 전송</label></div>
-                <div class="wt-s-row" title="감지된 장소명을 Photon 검색 서비스에 자동 전송합니다"><label><input type="checkbox" id="wt-s-auto-geocode"/> 🌐 장소명 자동 좌표 검색 허용</label></div>
-                <div class="wt-s-row" title="기본값은 꺼짐입니다. 켜면 선택한 RP 장소 정보로 Google 지도 웹 링크를 열 수 있습니다"><label><input type="checkbox" id="wt-s-google-links"/> 🗺️ Google·Street View 링크 표시</label></div>
-                <div class="wt-s-row" style="display:flex;align-items:center;gap:6px">
-                    <label style="white-space:nowrap">🗺️ 지도 스타일</label>
-                    <select id="wt-s-mapstyle" class="text_pole wt-select" style="flex:1;font-size:11px"><option value="liberty">Liberty</option><option value="bright">Bright</option><option value="dark">Dark</option></select>
-                </div>
-                <div class="wt-divider"></div>
-                <div class="wt-s-row" style="display:flex;align-items:center;gap:6px" title="AI 생성(리뷰/커뮤니티/요약) 호출 방식">
-                    <label style="white-space:nowrap">🤖 AI 연결 방식</label>
-                    <select id="wt-s-llmmode" class="text_pole wt-select" style="flex:1;font-size:11px">
-                        <option value="profile" selected>🔗 연결 프로필 (기본)</option>
-                        <option value="direct">🔑 API 키 직접 입력 (Grounding 지원)</option>
-                    </select>
-                </div>
-                <div id="wt-s-profile-wrap">
-                <div class="wt-s-row"><label>🔗 생성 연결 프로필 (리뷰/커뮤니티)</label></div>
-                <div class="wt-s-row" style="display:flex;gap:4px;align-items:center">
-                    <select id="wt-s-profile" class="text_pole wt-select" style="flex:1;font-size:11px"><option value="">없음 (AI 호출 차단)</option></select>
-                    <button id="wt-s-profile-save" class="menu_button" style="font-size:11px;padding:6px 10px;white-space:nowrap">💾 저장</button>
-                    <button id="wt-s-llm-test" class="menu_button" style="font-size:11px;padding:6px 10px;white-space:nowrap">🧪 테스트</button>
-                </div>
-                <span id="wt-s-profile-status" style="font-size:10px;color:#9A8A7A;display:block;margin-top:2px">선택한 프로필만 사용합니다. PAW MAP이 별도 카드나 결제 계정을 연결하지 않으며, 해당 프로필 공급자의 토큰·크레딧이 사용될 수 있습니다.</span>
-                <span id="wt-s-llm-status" style="font-size:10px;color:#9A8A7A;display:block;margin-top:2px">확장 자체는 API 키를 읽거나 저장하지 않습니다.</span>
-                </div>
-                <div id="wt-s-direct-wrap" style="display:none">
-                    <div class="wt-s-row"><label>🔑 LLM API (직접 호출)</label></div>
-                    <div class="wt-s-row" style="display:flex;gap:4px;align-items:center">
-                        <select id="wt-s-llmprovider" class="text_pole wt-select" style="flex:1;font-size:11px">
-                            <option value="google" selected>Google (Gemini)</option>
-                            <option value="vertex">Vertex AI</option>
-                            <option value="openai">OpenAI</option>
-                            <option value="openrouter">OpenRouter</option>
-                            <option value="claude">Claude</option>
-                        </select>
-                        <input type="text" id="wt-s-llmmodel" class="text_pole" placeholder="모델 (예: gemini-2.5-flash)" style="flex:1.2;font-size:11px"/>
+                <div style="padding:9px;border:1px solid rgba(246,169,58,.55);border-radius:10px;background:rgba(246,169,58,.08)">
+                    <div class="wt-s-row" style="margin:0"><label style="font-weight:800"><input type="checkbox" id="wt-s-ai-use"/> 🪙 AI 기능 사용</label></div>
+                    <div style="font-size:10px;line-height:1.4;color:#8A7350;margin:2px 0 6px">켜면 리뷰·커뮤니티·자동 기록에 채팅 내용이 사용되고, 연결된 계정의 크레딧이 들 수 있어요. 다른 결제 계정이 연결되지는 않아요.</div>
+                    <div id="wt-s-ai-options">
+                        <div class="wt-s-row"><label><input type="checkbox" id="wt-s-autorecord"/> 📝 이벤트·예정 일정 자동 기록</label></div>
+                        <div class="wt-s-row" title="지도·이벤트·NPC 정보를 평소 롤플 생성에 함께 보냅니다"><label><input type="checkbox" id="wt-s-inject"/> 🗺️ 지도 정보를 롤플에 반영</label></div>
+                        <div class="wt-s-row"><label><input type="checkbox" id="wt-s-dragevent"/> ✂️ 드래그한 문장 AI 요약</label></div>
+                        <div class="wt-s-row" style="display:flex;align-items:center;gap:6px" title="AI 생성에 사용할 연결">
+                            <label style="white-space:nowrap">AI 연결</label>
+                            <select id="wt-s-llmmode" class="text_pole wt-select" style="flex:1;font-size:11px">
+                                <option value="profile" selected>연결 프로필</option>
+                                <option value="direct">Vertex 키</option>
+                            </select>
+                        </div>
+                        <div id="wt-s-profile-wrap">
+                            <div class="wt-s-row" style="display:flex;gap:4px;align-items:center">
+                                <select id="wt-s-profile" class="text_pole wt-select" style="flex:1;font-size:11px"><option value="">선택 안 함</option></select>
+                                <button id="wt-s-profile-save" class="menu_button" style="font-size:11px;padding:6px 9px;white-space:nowrap">저장</button>
+                                <button id="wt-s-llm-test" class="menu_button" style="font-size:11px;padding:6px 9px;white-space:nowrap">테스트</button>
+                            </div>
+                            <span id="wt-s-profile-status" style="font-size:10px;color:#9A8A7A;display:block;margin-top:2px"></span>
+                            <span id="wt-s-llm-status" style="font-size:10px;color:#9A8A7A;display:block;margin-top:2px"></span>
+                        </div>
+                        <div id="wt-s-direct-wrap" style="display:none">
+                            <div class="wt-s-row" style="display:flex;gap:4px;align-items:center">
+                                <input type="text" id="wt-s-llmmodel" class="text_pole" placeholder="gemini-3.7-flash" style="flex:1;min-width:0;font-size:11px"/>
+                                <button id="wt-s-model-toggle" type="button" class="menu_button" title="Flash 모델 목록" style="font-size:11px;padding:6px 9px">▼</button>
+                            </div>
+                            <select id="wt-s-model-menu" class="text_pole wt-select" size="6" style="display:none;width:100%;font-size:11px;margin:2px 0 5px">
+                                <option value="gemini-3.7-flash">Gemini 3.7 Flash</option>
+                                <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+                                <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                                <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite</option>
+                                <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash-Lite</option>
+                                <option value="gemini-3-flash-preview">Gemini 3 Flash Preview</option>
+                                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                                <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash-Lite</option>
+                            </select>
+                            <div class="wt-s-row" style="display:flex;gap:4px;align-items:center">
+                                <input type="password" id="wt-s-llmkey" class="text_pole" placeholder="Vertex Express API 키" style="flex:1;min-width:0;font-size:11px" autocomplete="off"/>
+                                <button id="wt-s-llmkey-save" class="menu_button" style="font-size:11px;padding:6px 9px;white-space:nowrap">저장</button>
+                                <button id="wt-s-vertex-test" class="menu_button" style="font-size:11px;padding:6px 8px;white-space:nowrap">테스트</button>
+                                <button id="wt-s-llmkey-clear" class="menu_button" title="저장된 키 삭제" style="font-size:11px;padding:6px 8px;white-space:nowrap">삭제</button>
+                            </div>
+                            <span id="wt-s-direct-status" style="font-size:10px;color:#9A8A7A;display:block;margin-top:2px">키는 이 브라우저에만 저장되고 PAW MAP 백업·디버그에는 들어가지 않아요.</span>
+                        </div>
+                        <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin-top:7px">
+                            <label style="display:block;min-width:0;font-size:9.5px;font-weight:700">표시 언어<select id="wt-s-eventlang" class="text_pole wt-select" style="display:block;width:100%;font-size:10px;margin-top:2px"><option value="ko">한국어</option><option value="en">영어</option></select></label>
+                            <label style="display:block;min-width:0;font-size:9.5px;font-weight:700">생성 분량<select id="wt-s-genSize" class="text_pole wt-select" style="display:block;width:100%;font-size:10px;margin-top:2px"><option value="light">적게</option><option value="normal">보통</option><option value="rich">많이</option></select></label>
+                            <label style="display:block;min-width:0;font-size:9.5px;font-weight:700">현지 정보<select id="wt-s-enrich" class="text_pole wt-select" style="display:block;width:100%;font-size:10px;margin-top:2px"><option value="off">사용 안 함</option><option value="overpass">주변 정보</option><option value="grounding">구글 검색</option></select></label>
+                        </div>
                     </div>
-                    <div class="wt-s-row" style="display:flex;gap:4px;align-items:center">
-                        <input type="password" id="wt-s-llmkey" class="text_pole" placeholder="API 키" style="flex:1;font-size:11px" autocomplete="off"/>
-                        <button id="wt-s-llmkey-save" class="menu_button" style="font-size:11px;padding:6px 10px;white-space:nowrap">💾 저장</button>
-                    </div>
-                    <span style="font-size:10px;color:#9A8A7A;display:block;margin-top:2px">키는 이 기기의 SillyTavern 설정에만 저장됩니다. Grounding(구글 검색 보강)은 Google 프로바이더에서만 지원.</span>
                 </div>
-                <div class="wt-divider"></div>
-                <div class="wt-s-row" style="display:flex;align-items:center;gap:6px" title="이벤트/리뷰/실시간 반응에 공통 적용">
-                    <label style="white-space:nowrap">🌐 AI 출력 언어</label>
-                    <select id="wt-s-eventlang" class="text_pole wt-select" style="flex:1;font-size:11px"><option value="auto">🔄 자동 (RP 언어 감지)</option><option value="ko">🇰🇷 한국어 고정</option><option value="en">🇺🇸 English fixed</option></select>
-                </div>
-                <div class="wt-s-row" style="display:flex;align-items:center;gap:6px" title="실시간/리뷰 생성 개수 — 모바일에서 타임아웃 나면 🌱 가벼움 권장">
-                    <label style="white-space:nowrap">📏 생성 분량</label>
-                    <select id="wt-s-genSize" class="text_pole wt-select" style="flex:1;font-size:11px">
-                        <option value="light">🌱 가벼움 (모바일 권장)</option>
-                        <option value="normal" selected>⚖️ 기본</option>
-                        <option value="rich">🌿 풍성함 (토큰 ↑)</option>
-                    </select>
-                </div>
-                <div class="wt-s-row" style="display:flex;align-items:center;gap:6px" title="커뮤니티 생성 시 장소 주변 정보를 검색해서 더 현실적인 트윗 생성">
-                    <label style="white-space:nowrap">🔍 현지 정보 보강</label>
-                    <select id="wt-s-enrich" class="text_pole wt-select" style="flex:1;font-size:11px">
-                        <option value="off" selected>기본 (AI 연결만 사용)</option>
-                        <option value="overpass">주변 보강 (Overpass 좌표 전송 + AI 연결 사용)</option>
-                        <option value="grounding">⭐ 구글 검색 보강 (직접 API + Google 전용, 유료)</option>
-                    </select>
-                </div>
-                <div class="wt-divider"></div>
-                <div class="wt-s-row"><label><input type="checkbox" id="wt-s-worldcont"/> 🌍 세계관 이어가기</label></div>
-                <span id="wt-s-worldcont-status" style="font-size:10px;color:#9A8A7A;display:block;margin-top:1px;margin-bottom:4px">새 채팅에서도 같은 캐릭터의 세계관 유지</span>
                 <div class="wt-divider"></div>
                 <div class="wt-s-row"><label>📦 전체 데이터 관리</label></div>
                 <div class="wt-s-row" style="display:flex;gap:4px">
@@ -477,48 +458,61 @@ export class UIManager {
         const bind = (sel, key, def) => $(sel).prop('checked', s?.[key] ?? def).on('change', function(){ s[key]=$(this).is(':checked'); saveSettingsDebounced(); });
         bind('#wt-s-enabled','enabled',true); bind('#wt-s-detect','autoDetect',true); bind('#wt-s-toast','showDetectToast',true); bind('#wt-s-inject','aiInjection',false); bind('#wt-s-moveevent','moveEvent',true);
         bind('#wt-s-dragevent','dragEvent',false);
-        // v0.9.23: 장소 감지 모드 + 이벤트 자동 기록
-        bind('#wt-s-autoevent','autoEvent',false);
-        bind('#wt-s-autoschedule','autoSchedule',false);
-        bind('#wt-s-external-ai','externalAiEnabled',false);
-        bind('#wt-s-share-rp','shareRpData',false);
         bind('#wt-s-auto-geocode','allowAutoGeocoding',false);
         bind('#wt-s-google-links','showGoogleLinks',false);
-        $('#wt-s-autoevent, #wt-s-autoschedule').on('change', function() {
-            if (!$(this).is(':checked')) return;
-            const isSchedule = this.id === 'wt-s-autoschedule';
-            const accepted = confirm(isSchedule
-                ? '약속/일정 신호가 감지될 때마다 선택한 연결 프로필의 토큰·크레딧이 사용될 수 있습니다. PAW MAP이 별도 카드나 결제 계정을 연결하지 않습니다. 계속할까요?'
-                : '새 RP 메시지 처리 중 선택한 연결 프로필의 토큰·크레딧이 반복 사용될 수 있습니다. PAW MAP이 별도 카드나 결제 계정을 연결하지 않습니다. 계속할까요?');
-            if (!accepted) {
-                $(this).prop('checked', false);
-                s[isSchedule ? 'autoSchedule' : 'autoEvent'] = false;
-                saveSettingsDebounced();
-            }
-        });
-        $('#wt-s-share-rp').prop('disabled', s?.externalAiEnabled !== true);
-        $('#wt-s-external-ai').on('change', () => {
-            let enabled = s.externalAiEnabled === true;
-            if (enabled && !confirm('테스트·이벤트·리뷰·커뮤니티 생성 시 선택한 연결 프로필 공급자의 토큰·크레딧이 사용될 수 있습니다. PAW MAP이 별도 카드나 결제 계정을 연결하지 않습니다. 외부 AI 호출을 허용할까요?')) {
+
+        // 한 개의 쉬운 스위치로 기존 이중 동의(externalAiEnabled + shareRpData)를 함께 관리한다.
+        const aiEnabled = s.externalAiEnabled === true && s.shareRpData === true;
+        if (!aiEnabled && (s.externalAiEnabled === true || s.shareRpData === true || s.autoEvent === true || s.autoSchedule === true || s.aiInjection === true || s.dragEvent === true)) {
+            s.externalAiEnabled = false;
+            s.shareRpData = false;
+            s.autoEvent = false;
+            s.autoSchedule = false;
+            s.aiInjection = false;
+            s.dragEvent = false;
+            $('#wt-s-inject,#wt-s-dragevent').prop('checked', false);
+            this.pi?.clear();
+            saveSettingsDebounced();
+        }
+        $('#wt-s-ai-use').prop('checked', aiEnabled);
+        $('#wt-s-ai-options').toggle(aiEnabled);
+        $('#wt-s-ai-use').on('change', (event) => {
+            const control = $(event.currentTarget);
+            let enabled = control.is(':checked');
+            if (enabled && !confirm('AI 기능을 켜면 RP/채팅 내용과 지도 맥락이 선택한 AI로 전송되고, 연결된 계정의 크레딧이 사용될 수 있어요. PAW MAP이 다른 카드나 결제 계정을 연결하지는 않아요. 계속할까요?')) {
                 enabled = false;
-                s.externalAiEnabled = false;
-                $('#wt-s-external-ai').prop('checked', false);
+                control.prop('checked', false);
             }
-            $('#wt-s-share-rp').prop('disabled', !enabled);
+            s.externalAiEnabled = enabled;
+            s.shareRpData = enabled;
+            $('#wt-s-ai-options').toggle(enabled);
             if (!enabled) {
-                s.shareRpData = false;
-                $('#wt-s-share-rp').prop('checked', false);
-                saveSettingsDebounced();
+                s.autoEvent = false;
+                s.autoSchedule = false;
+                s.aiInjection = false;
+                s.dragEvent = false;
+                $('#wt-s-autorecord,#wt-s-inject,#wt-s-dragevent').prop('checked', false);
+                this.pi?.clear();
             }
+            saveSettingsDebounced();
         });
-        $('#wt-s-share-rp').on('change', function() {
-            if (!$(this).is(':checked')) return;
-            const accepted = confirm('RP/채팅 원문, 캐릭터 설명, 장소·이벤트 맥락이 선택한 연결 프로필의 AI 공급자에게 전송되며 해당 공급자의 토큰·크레딧을 사용합니다. 기능에 따라 최근 채팅은 최대 2,500자, 자동 이벤트는 현재 장면 최대 2,000자와 최근 채팅 최대 1,500자를 사용할 수 있습니다. PAW MAP이 별도 카드나 결제 계정을 연결하지 않습니다. 계속할까요?');
-            if (!accepted) {
+
+        // 이벤트와 예정 일정은 화면에서는 하나로, 내부 호환값은 둘 다 유지한다.
+        const autoRecord = s.autoEvent === true && s.autoSchedule === true;
+        if (!autoRecord && (s.autoEvent === true || s.autoSchedule === true)) {
+            s.autoEvent = false;
+            s.autoSchedule = false;
+            saveSettingsDebounced();
+        }
+        $('#wt-s-autorecord').prop('checked', autoRecord).on('change', function() {
+            let enabled = $(this).is(':checked');
+            if (enabled && !confirm('새 RP가 올 때 이벤트와 예정 일정을 AI가 자동으로 확인해요. 연결된 계정의 크레딧이 반복 사용될 수 있어요. 계속할까요?')) {
+                enabled = false;
                 $(this).prop('checked', false);
-                s.shareRpData = false;
-                saveSettingsDebounced();
             }
+            s.autoEvent = enabled;
+            s.autoSchedule = enabled;
+            saveSettingsDebounced();
         });
         $('#wt-s-auto-geocode').on('change', function() {
             if (!$(this).is(':checked')) return;
@@ -536,7 +530,7 @@ export class UIManager {
                 $('#wt-bottomsheet [data-action^="google-"]').remove();
                 return;
             }
-            const accepted = confirm('Google 링크를 열 때 선택한 RP 장소명·주소 또는 좌표가 Google에 전달될 수 있습니다. API 키나 Google Cloud 과금 API는 사용하지 않습니다. 버튼을 표시할까요?');
+            const accepted = confirm('Google 지도나 길찾기를 열면 장소명·주소 또는 좌표가 Google에 전달돼요. 이 링크 기능은 API 키와 과금 API를 쓰지 않아요. 켤까요?\n\nStreet View는 이 설정과 관계없이 계속 사용할 수 있어요.');
             if (!accepted) {
                 control.prop('checked', false);
                 s.showGoogleLinks = false;
@@ -563,10 +557,10 @@ export class UIManager {
                 saveSettingsDebounced();
             }
         });
-        $('#wt-s-mapstyle').val(s?.openMapStyle || 'liberty').on('change', () => {
-            s.openMapStyle = $('#wt-s-mapstyle').val();
+        $('#wt-s-mapappearance').val(s?.mapAppearance || 'theme').on('change', () => {
+            s.mapAppearance = $('#wt-s-mapappearance').val() === 'default' ? 'default' : 'theme';
             saveSettingsDebounced();
-            toastWarn('지도 스타일은 지도를 다시 열면 적용됩니다.');
+            toastWarn('지도 디자인은 지도를 다시 열면 적용돼요.');
         });
         {
             const dm = s?.detectMode || (s?.autoDetect ? 'auto' : 'off'); // 레거시 autoDetect 환산
@@ -580,7 +574,7 @@ export class UIManager {
         }
         $('#wt-s-inject').on('change', () => { s.aiInjection ? this.pi?.inject() : this.pi?.clear(); });
         $('#wt-s-mem').val(s?.memoryMode||'natural').on('change', () => { s.memoryMode=$('#wt-s-mem').val(); saveSettingsDebounced(); this.pi?.inject(); });
-        $('#wt-s-eventlang').val(s?.eventLang||'auto').on('change', () => { s.eventLang=$('#wt-s-eventlang').val(); saveSettingsDebounced(); });
+        $('#wt-s-eventlang').val(s?.eventLang === 'en' ? 'en' : 'ko').on('change', () => { s.eventLang=$('#wt-s-eventlang').val() === 'en' ? 'en' : 'ko'; saveSettingsDebounced(); });
         $('#wt-s-genSize').val(s?.genSize||'normal').on('change', () => { s.genSize=$('#wt-s-genSize').val(); saveSettingsDebounced(); });
         if (!['off', 'overpass', 'grounding'].includes(s?.locationEnrichment)) s.locationEnrichment = 'off';
         $('#wt-s-enrich').val(s?.locationEnrichment||'off').on('change', () => {
@@ -589,12 +583,11 @@ export class UIManager {
                 $('#wt-s-enrich').val('off');
                 s.locationEnrichment = 'off';
             } else if (selected === 'grounding') {
-                // v0.9.51: Grounding은 direct 모드 + Google 전용
-                if ((s.llmMode || 'profile') !== 'direct' || (s.llmProvider || 'google') !== 'google') {
-                    toastWarn('⭐ Grounding은 [AI 연결 방식 → API 키 직접 입력] + Google 프로바이더에서만 사용할 수 있어요');
+                if ((s.llmMode || 'profile') !== 'direct' || !getVertexApiKey()) {
+                    toastWarn('구글 검색은 Vertex 키를 저장한 뒤 사용할 수 있어요.');
                     $('#wt-s-enrich').val('off');
                     s.locationEnrichment = 'off';
-                } else if (!confirm('구글 검색 보강(Grounding)은 유료입니다 ($35/1k 요청). 장소명이 Google 검색에 전송됩니다. 계속할까요?')) {
+                } else if (!confirm('현지 정보에 구글 검색을 사용하면 장소명이 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. 계속할까요?')) {
                     $('#wt-s-enrich').val('off');
                     s.locationEnrichment = 'off';
                 } else {
@@ -616,33 +609,71 @@ export class UIManager {
             if (s.llmMode !== 'direct' && s.locationEnrichment === 'grounding') {
                 s.locationEnrichment = 'off';
                 $('#wt-s-enrich').val('off');
-                toastWarn('연결 프로필 모드에서는 Grounding이 꺼집니다');
+                toastWarn('연결 프로필에서는 구글 검색 보강이 꺼져요.');
             }
             saveSettingsDebounced();
             _syncLlmModeUI();
         });
         _syncLlmModeUI();
-        // direct 모드 필드 바인딩
-        $('#wt-s-llmprovider').val(s?.llmProvider || 'google').on('change', () => {
-            s.llmProvider = $('#wt-s-llmprovider').val();
-            if (s.llmProvider !== 'google' && s.locationEnrichment === 'grounding') {
+        // 직접 입력은 Vertex Express 키 하나만 지원한다.
+        s.llmProvider = 'vertex';
+        $('#wt-s-llmmodel').val(s?.llmModel || 'gemini-3.7-flash').on('input change', () => {
+            s.llmModel = $('#wt-s-llmmodel').val().trim() || 'gemini-3.7-flash';
+            saveSettingsDebounced();
+        });
+        $('#wt-s-model-toggle').on('click', () => $('#wt-s-model-menu').toggle());
+        $('#wt-s-model-menu').on('change', () => {
+            const model = String($('#wt-s-model-menu').val() || '').trim();
+            if (!model) return;
+            $('#wt-s-llmmodel').val(model);
+            s.llmModel = model;
+            saveSettingsDebounced();
+            $('#wt-s-model-menu').hide();
+        });
+        const storedVertexKey = getVertexApiKey();
+        if (storedVertexKey) {
+            $('#wt-s-llmkey').attr('placeholder', `저장됨 (${maskVertexApiKey()})`);
+            $('#wt-s-direct-status').text(`Vertex 키 저장됨 (${maskVertexApiKey()})`).css('color', '#2B8A6E');
+        }
+        $('#wt-s-llmkey-save').on('click', () => {
+            const v = $('#wt-s-llmkey').val().trim();
+            if (!v) { toastWarn('Vertex 키를 입력해주세요.'); return; }
+            saveVertexApiKey(v);
+            delete s.llmApiKey;
+            s.llmProvider = 'vertex';
+            saveSettingsDebounced();
+            $('#wt-s-llmkey').val('').attr('placeholder', `저장됨 (${maskVertexApiKey()})`);
+            $('#wt-s-direct-status').text(`Vertex 키 저장됨 (${maskVertexApiKey()})`).css('color', '#2B8A6E');
+            toastSuccess('🔑 Vertex 키 저장됨');
+        });
+        $('#wt-s-llmkey-clear').on('click', () => {
+            if (!getVertexApiKey()) { toastWarn('저장된 Vertex 키가 없어요.'); return; }
+            if (!confirm('이 브라우저에 저장된 Vertex 키를 삭제할까요?')) return;
+            clearVertexApiKey();
+            delete s.llmApiKey;
+            if (s.locationEnrichment === 'grounding') {
                 s.locationEnrichment = 'off';
                 $('#wt-s-enrich').val('off');
             }
             saveSettingsDebounced();
+            $('#wt-s-llmkey').val('').attr('placeholder', 'Vertex Express API 키');
+            $('#wt-s-direct-status').text('저장된 Vertex 키가 없어요.').css('color', '#9A8A7A');
+            toastSuccess('Vertex 키 삭제됨');
         });
-        $('#wt-s-llmmodel').val(s?.llmModel || 'gemini-2.5-flash').on('change', () => {
-            s.llmModel = $('#wt-s-llmmodel').val().trim();
-            saveSettingsDebounced();
-        });
-        if (s?.llmApiKey) $('#wt-s-llmkey').attr('placeholder', `저장됨 (***${s.llmApiKey.slice(-4)})`);
-        $('#wt-s-llmkey-save').on('click', () => {
-            const v = $('#wt-s-llmkey').val().trim();
-            if (!v) { toastWarn('API 키를 입력해주세요'); return; }
-            s.llmApiKey = v;
-            saveSettingsDebounced();
-            $('#wt-s-llmkey').val('').attr('placeholder', `저장됨 (***${v.slice(-4)})`);
-            toastSuccess('🔑 API 키 저장됨');
+        $('#wt-s-vertex-test').on('click', async () => {
+            if (!getVertexApiKey()) { toastWarn('먼저 Vertex 키를 저장해주세요.'); return; }
+            $('#wt-s-direct-status').text('Vertex 연결 확인 중...').css('color', '#5E84E2');
+            try {
+                const result = await callLLM('Respond with ONLY this JSON: {"test":"ok"}', { sensitive: false, maxTokens: 256, timeoutMs: 15000 });
+                if (result && result.includes('ok')) {
+                    $('#wt-s-direct-status').text(`Vertex 연결 성공 (${maskVertexApiKey()})`).css('color', '#2B8A6E');
+                    toastSuccess('Vertex 연결 성공');
+                } else {
+                    $('#wt-s-direct-status').text(window._wtLastLLMError || '응답 없음').css('color', '#F5A8A8');
+                }
+            } catch (error) {
+                $('#wt-s-direct-status').text(error?.message || '연결 실패').css('color', '#F5A8A8');
+            }
         });
         // 🧠 감지 모델 프로필 로드
         this._loadProfiles();
@@ -666,7 +697,7 @@ export class UIManager {
                 } else if (result) {
                     $('#wt-s-llm-status').text('⚠️ 응답은 왔지만 예상 JSON 형식이 아님').css('color', '#E07C3A');
                 } else {
-                    $('#wt-s-llm-status').text('⚠️ 빈 응답 — 외부 AI 허용과 연결 프로필을 확인하세요').css('color', '#F5A8A8');
+                    $('#wt-s-llm-status').text('⚠️ 빈 응답 — AI 기능과 연결 프로필을 확인하세요').css('color', '#F5A8A8');
                 }
             } catch(e) {
                 $('#wt-s-llm-status').text('❌ ' + e.message).css('color', '#F5A8A8');
@@ -5088,19 +5119,23 @@ ${trimmed.substring(0, 1500)}`;
 
     async _ensureCommunityAccess() {
         const settings = extension_settings[EXTENSION_NAME];
-        if (!settings?.selectedProfile) {
+        if ((settings?.llmMode || 'profile') === 'direct' && !getVertexApiKey()) {
+            toastWarn('먼저 PAW MAP 설정에서 Vertex 키를 저장해주세요.');
+            return false;
+        }
+        if ((settings?.llmMode || 'profile') !== 'direct' && !settings?.selectedProfile) {
             toastWarn('먼저 PAW MAP 설정에서 AI 연결 프로필을 선택해주세요.');
             return false;
         }
         if (settings.externalAiEnabled === true && settings.shareRpData === true) return true;
 
-        const accepted = confirm('커뮤니티 생성은 선택한 연결 프로필 공급자의 토큰·크레딧을 사용하며, 저장된 장소명·주소·메모, 사용자·캐릭터명, 최근 이벤트와 최근 채팅 최대 800자를 해당 공급자에 전송합니다. PAW MAP이 별도 카드나 결제 계정을 연결하지 않습니다.\n\n이 동의는 PAW MAP 설정에 저장되어 이후 수동 리뷰·NPC 생성에도 적용됩니다. 이때 기능에 따라 캐릭터 설명과 최근 채팅 최대 2,500자가 전송될 수 있습니다. 자동 이벤트·일정은 별도 설정을 켜야 하며, 자동 이벤트는 현재 장면 최대 2,000자와 최근 채팅 최대 1,500자를 사용할 수 있습니다. 저장 동의를 허용할까요?');
+        const accepted = confirm('커뮤니티를 만들면 장소 정보와 최근 RP 내용이 선택한 AI로 전송되고, 연결된 계정의 크레딧이 사용될 수 있어요. PAW MAP이 다른 카드나 결제 계정을 연결하지는 않아요. AI 기능을 켤까요?');
         if (!accepted) return false;
 
         settings.externalAiEnabled = true;
         settings.shareRpData = true;
-        $('#wt-s-external-ai,#wt-s-share-rp').prop('checked', true);
-        $('#wt-s-share-rp').prop('disabled', false);
+        $('#wt-s-ai-use').prop('checked', true);
+        $('#wt-s-ai-options').show();
         saveSettingsDebounced();
         return true;
     }
@@ -5144,14 +5179,14 @@ ${trimmed.substring(0, 1500)}`;
                 resolve(value);
             };
             const sNow = extension_settings[EXTENSION_NAME] || {};
-            const groundingAvail = (sNow.llmMode === 'direct') && ((sNow.llmProvider || 'google') === 'google') && !!sNow.llmApiKey;
+            const groundingAvail = (sNow.llmMode === 'direct') && !!getVertexApiKey();
             const overlay = $(`<div id="wt-community-mode-overlay" role="dialog" aria-modal="true" aria-label="커뮤니티 생성 방식" style="position:fixed !important;top:0 !important;left:0 !important;width:100vw !important;height:100vh;height:100dvh !important;z-index:2147483647 !important;background:rgba(20,20,20,.46);display:flex !important;align-items:center;justify-content:center;padding:18px;font-family:-apple-system,'Noto Sans KR',sans-serif;isolation:isolate">
                 <div style="width:min(430px,100%);background:#fff;border-radius:16px;padding:16px;box-shadow:0 10px 36px rgba(0,0,0,.28)">
                     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><strong style="font-size:16px;color:#202124;flex:1">💬 커뮤니티 생성 방식</strong><button type="button" id="wt-community-mode-close" aria-label="닫기" style="border:0;background:#F1F3F4;border-radius:50%;width:30px;height:30px;cursor:pointer">✕</button></div>
                     <button type="button" id="wt-community-mode-basic" style="width:100%;text-align:left;padding:12px;border:1.5px solid #DADCE0;border-radius:11px;background:#fff;cursor:pointer;font-family:inherit"><b style="display:block;color:#202124">기본 생성</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#6F7378;line-height:1.4">저장된 장소 정보·이벤트·사용자/캐릭터명·최근 채팅 최대 800자와 선택한 AI 연결만 사용</span></button>
                     <button type="button" id="wt-community-mode-nearby" ${exactCoordinates ? '' : 'disabled'} style="width:100%;text-align:left;padding:12px;margin-top:8px;border:1.5px solid #B8D5C8;border-radius:11px;background:${exactCoordinates ? '#F2FBF6' : '#F4F4F4'};cursor:${exactCoordinates ? 'pointer' : 'not-allowed'};opacity:${exactCoordinates ? '1' : '.55'};font-family:inherit"><b style="display:block;color:#1E6B54">주변 장소 보강</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#5E756B;line-height:1.4">반올림한 확정 좌표로 Overpass 주변 POI를 조회한 뒤 같은 AI 연결 사용</span></button>
-                    <button type="button" id="wt-community-mode-grounding" ${groundingAvail ? '' : 'disabled'} style="width:100%;text-align:left;padding:12px;margin-top:8px;border:1.5px solid #F0D9A8;border-radius:11px;background:${groundingAvail ? '#FFFBF0' : '#F4F4F4'};cursor:${groundingAvail ? 'pointer' : 'not-allowed'};opacity:${groundingAvail ? '1' : '.55'};font-family:inherit"><b style="display:block;color:#9A6B1F">⭐ 구글 검색 보강 (Grounding)</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#8A7350;line-height:1.4">실시간 구글 검색으로 현지 정보 반영 — 직접 API(Google) 전용, 유료</span></button>
-                    ${groundingAvail ? '' : `<div style="font-size:10px;color:#A08050;margin-top:6px">Grounding 사용: 설정 → AI 연결 방식을 [API 키 직접 입력] + Google로</div>`}
+                    <button type="button" id="wt-community-mode-grounding" ${groundingAvail ? '' : 'disabled'} style="width:100%;text-align:left;padding:12px;margin-top:8px;border:1.5px solid #F0D9A8;border-radius:11px;background:${groundingAvail ? '#FFFBF0' : '#F4F4F4'};cursor:${groundingAvail ? 'pointer' : 'not-allowed'};opacity:${groundingAvail ? '1' : '.55'};font-family:inherit"><b style="display:block;color:#9A6B1F">⭐ 구글 검색 보강</b><span style="display:block;margin-top:3px;font-size:10.5px;color:#8A7350;line-height:1.4">실시간 구글 검색으로 현지 정보 반영 — Vertex 키 필요</span></button>
+                    ${groundingAvail ? '' : `<div style="font-size:10px;color:#A08050;margin-top:6px">사용 방법: 설정 → AI 연결 → Vertex 키 저장</div>`}
                     ${exactCoordinates ? '' : `<div style="font-size:10px;color:#A05A42;margin-top:6px">주변 보강 사용 불가: ${this._escapeHtml(coordinateState.reason)}</div>`}
                     <label style="display:flex;align-items:center;gap:6px;margin-top:12px;padding-top:10px;border-top:1px solid #F0EDE5;font-size:11.5px;color:#5A4A3A;cursor:pointer"><input type="checkbox" id="wt-community-mode-remember" ${(extension_settings[EXTENSION_NAME]?.communityGenRemember === true) ? 'checked' : ''} style="width:15px;height:15px"/> 이 선택 기억하기 (다음부터 바로 생성 — 피드의 모드 칩에서 변경 가능)</label>
                 </div>
@@ -5175,11 +5210,10 @@ ${trimmed.substring(0, 1500)}`;
                 saveSettingsDebounced();
                 finish('overpass');
             });
-            // v0.9.51: Grounding 모드 (직접 API + Google 전용)
             overlay.find('#wt-community-mode-grounding').on('click', () => {
                 if (!groundingAvail) return;
                 const settings = extension_settings[EXTENSION_NAME];
-                if (settings.locationEnrichment !== 'grounding' && !confirm('구글 검색 보강(Grounding)은 유료입니다 ($35/1k 요청). 장소명이 Google 검색에 전송됩니다. 계속할까요?')) return;
+                if (settings.locationEnrichment !== 'grounding' && !confirm('구글 검색을 사용하면 장소명이 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. 계속할까요?')) return;
                 settings.locationEnrichment = 'grounding';
                 $('#wt-s-enrich').val('grounding');
                 saveSettingsDebounced();
@@ -5194,7 +5228,7 @@ ${trimmed.substring(0, 1500)}`;
         if (!forceAsk && s.communityGenRemember === true) {
             let mode = ['off', 'overpass', 'grounding'].includes(s.locationEnrichment) ? s.locationEnrichment : 'off';
             // grounding 유효성 재검증 (설정 바뀌었으면 강등)
-            if (mode === 'grounding' && (s.llmMode !== 'direct' || (s.llmProvider || 'google') !== 'google' || !s.llmApiKey)) {
+            if (mode === 'grounding' && (s.llmMode !== 'direct' || !getVertexApiKey())) {
                 mode = 'off';
             }
             return await this._generateCommunity(locId, mode);
@@ -5225,10 +5259,10 @@ ${trimmed.substring(0, 1500)}`;
             toastWarn(`주변 보강 차단 (${coordinateState.reason}) — 기본 생성으로 진행합니다.`);
             enrichMode = 'off';
         }
-        // v0.9.51: Grounding은 직접 API(Google) 모드에서만 — 아니면 기본 생성으로 강등
+        // 구글 검색 보강은 Vertex Express 키 연결에서만 사용한다.
         const sG = extension_settings[EXTENSION_NAME] || {};
-        if (enrichMode === 'grounding' && (sG.llmMode !== 'direct' || (sG.llmProvider || 'google') !== 'google' || !sG.llmApiKey)) {
-            toastWarn('⭐ Grounding 사용 불가 (직접 API + Google 필요) — 기본 생성으로 진행합니다.');
+        if (enrichMode === 'grounding' && (sG.llmMode !== 'direct' || !getVertexApiKey())) {
+            toastWarn('구글 검색 사용 불가 (Vertex 키 필요) — 기본 생성으로 진행합니다.');
             enrichMode = 'off';
         }
         window._wtUseGrounding = (enrichMode === 'grounding');
@@ -5278,7 +5312,7 @@ ${trimmed.substring(0, 1500)}`;
             // v0.9.54: 생성 시작 시 현재 LLM 모드 + 생성 방식 표시 (과금 헷갈림 방지)
             {
                 const sM = extension_settings[EXTENSION_NAME] || {};
-                const modeTag = (sM.llmMode === 'direct') ? `🔑 직접 API (${sM.llmProvider || 'google'})` : '🔗 연결 프로필';
+                const modeTag = (sM.llmMode === 'direct') ? '🔑 Vertex 키' : '🔗 연결 프로필';
                 const enrichTag = enrichMode === 'grounding' ? ' + ⭐구글검색' : enrichMode === 'overpass' ? ' + 🌿주변보강' : '';
                 toastSuccess(`💬 커뮤니티 생성 시작 — ${modeTag}${enrichTag}`);
             }
@@ -5294,7 +5328,6 @@ ${trimmed.substring(0, 1500)}`;
 
 ⚠️⚠️⚠️ **JSON 안전 규칙 (최우선!)** ⚠️⚠️⚠️
 본문은 순수 텍스트로만 작성. HTML, Markdown 링크, 이미지 URL, 외부 리소스, 스크립트는 절대 출력하지 말 것.
-사진이 어울리는 포스트에는 (전체의 30~40%) 선택적으로 "img" 필드에 **영어 키워드 3~6단어만** 넣어라 (예: "golden hour sunset harbor cinematic"). URL·HTML 금지, 키워드 텍스트만. 장소·분위기·계절 고증에 맞게.
 모든 문자열은 JSON에 맞게 이스케이프하고, 유효한 JSON 객체 하나만 출력할 것.
 
 🚨🚨🚨 **창의성 규칙 — 예시 복붙 절대 금지!** 🚨🚨🚨
@@ -5726,8 +5759,6 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                     mood: this._plainText(p.mood || '', 30),
                     moodLabel: this._plainText(p.moodLabel || '', 40),
                     text: safeText,
-                    // v0.9.54: 이미지 키워드 (영문/숫자/공백/쉼표/하이픈만, URL은 렌더 시 확장이 조립)
-                    img: typeof p.img === 'string' ? p.img.replace(/[^a-zA-Z0-9\s,\-]/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 80) : '',
                     mentions,
                     hashtags,
                     likes: Math.max(0, Math.min(999, Number(p.likes) || 0)),
@@ -5947,11 +5978,10 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
         const cfgSummary = [
             `enabled: ${s.enabled !== false ? 'on' : 'OFF ⚠️'}`,
             `detectMode: ${s.detectMode || (s.autoDetect ? 'auto' : 'off')}`,
-            `📅 autoSchedule(예정일정): ${s.autoSchedule ? 'on' : 'off'}`,
-            `externalAiEnabled: ${s.externalAiEnabled === true ? 'on' : 'off'}`,
-            `shareRpData: ${s.shareRpData === true ? 'on' : 'off'}`,
+            `autoRecord(이벤트·예정일정): ${s.autoEvent === true && s.autoSchedule === true ? 'on' : 'off'}`,
+            `AI 기능: ${s.externalAiEnabled === true && s.shareRpData === true ? 'on' : 'off'}`,
             `allowAutoGeocoding: ${s.allowAutoGeocoding === true ? 'on' : 'off'}`,
-            `llmMode: ${s.llmMode || 'profile'}${s.llmMode === 'direct' ? ` (${s.llmProvider || 'google'}/${s.llmModel || '?'}, key=${s.llmApiKey ? '***' + s.llmApiKey.slice(-4) : 'none'})` : ''}`,
+            `llmMode: ${s.llmMode || 'profile'}${s.llmMode === 'direct' ? ` (vertex/${s.llmModel || '?'}, key=${maskVertexApiKey()})` : ''}`,
             `connectionProfile: ${s.selectedProfile ? 'selected' : 'none'}`,
             `dragEvent: ${s.dragEvent === true ? 'on' : 'off'} / aiInjection: ${s.aiInjection === true ? 'on' : 'off'}`,
             `locationEnrichment: ${s.locationEnrichment || 'off'}`,
@@ -5980,16 +6010,12 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                         <div style="font-weight:700;margin-bottom:4px;color:#7B1FA2">⚙️ 현재 저장된 설정</div>
                         <pre style="margin:0;white-space:pre-wrap;font-size:10px;font-family:inherit">${this._escapeHtml(cfgSummary)}</pre>
                     </div>
-                    <div style="margin-bottom:8px;padding:8px;background:#E8F5E9;border-radius:6px;font-family:inherit">
-                        <div style="font-weight:700;margin-bottom:4px;color:#2E7D32">📜 마지막 LLM 응답 (Raw, 앞 1200자)</div>
-                        <pre style="margin:0;white-space:pre-wrap;word-break:break-all;font-size:10px;font-family:inherit;max-height:180px;overflow-y:auto">${this._escapeHtml(String(window._wtLastRawResponse || '(아직 LLM 응답 없음)').substring(0, 1200))}</pre>
-                    </div>
                     <div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap">
                         <button id="wt-debug-copy" class="menu_button" style="flex:1;font-size:11px;padding:8px;min-width:100px">📋 안전 진단 복사</button>
                         <button id="wt-debug-retry" class="menu_button" style="flex:1;font-size:11px;padding:8px;min-width:100px">🔄 현재 장소 재시도</button>
                     </div>
                     <div style="margin-top:8px;padding:8px;background:#E8F5FD;border-radius:6px;font-size:10px;color:#1A73E8">
-                        🔒 API 키·프롬프트·채팅 원문은 포함하지 않습니다. LLM Raw 응답은 디버깅용으로 앞부분만 표시됩니다.
+                        🔒 API 키·프롬프트·채팅 원문·LLM 원문 응답은 포함하지 않습니다.
                     </div>
                 </div>
             </div>
@@ -5998,8 +6024,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
         $('#wt-debug-close').on('click', () => modal.remove());
         $('#wt-debug-modal').on('click', (e) => { if (e.target === e.currentTarget) modal.remove(); });
         $('#wt-debug-copy').on('click', async () => {
-            const rawResp = String(window._wtLastRawResponse || '(아직 LLM 응답 없음)').substring(0, 1500);
-            const txt = `[PAW MAP Debug @ ${errAt}]\nError Type: ${errType}\nError Msg: ${lastErr}\n\n--- API Status ---\n${apiStatus}\n\n--- Settings ---\n${cfgSummary}\n\n--- Raw Response (${rawResp.length}c) ---\n${rawResp}`;
+            const txt = `[PAW MAP Debug @ ${errAt}]\nError Type: ${errType}\nError Msg: ${lastErr}\n\n--- API Status ---\n${apiStatus}\n\n--- Settings ---\n${cfgSummary}`;
             try {
                 await navigator.clipboard.writeText(txt);
                 toastSuccess('📋 클립보드에 복사됨');
@@ -6282,17 +6307,6 @@ Respond with ONLY a JSON object, no markdown, no explanation:
         return `<div class="wt-pin-btn" data-pin-locid="${loc.id}" data-pin-kind="${kind}"${extraData} style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;cursor:pointer;font-weight:${on ? '700' : '400'};color:${on ? '#1D9BF0' : '#536471'}">📌 ${on ? '반영중' : '반영'}</div>`;
     }
 
-    // v0.9.54: 커뮤니티 이미지 — LLM은 영어 키워드만 출력, URL은 확장이 직접 조립 (XSS 불가)
-    _communityImgHtml(p) {
-        const raw = typeof p?.img === 'string' ? p.img : '';
-        if (!raw) return '';
-        // 영문/숫자/공백/쉼표/하이픈만 허용 — 그 외 문자 제거
-        const cleaned = raw.replace(/[^a-zA-Z0-9\s,\-]/g, ' ').replace(/\s{2,}/g, ' ').trim().slice(0, 80);
-        if (cleaned.length < 3) return '';
-        const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(cleaned)}?nologo=true&width=512&height=340`;
-        return `<img src="${url}" alt="" loading="lazy" referrerpolicy="no-referrer" style="width:100%;max-width:100%;border-radius:12px;margin-top:8px;display:block;background:#F0F3F4;min-height:60px" onerror="this.style.display='none'">`;
-    }
-
     _renderCommunityPostCard(p, locId) {
         const loc = locId ? this.lm.locations.find(l => l.id === locId) : null;
         const moodColors = {
@@ -6332,7 +6346,6 @@ Respond with ONLY a JSON object, no markdown, no explanation:
                 </div>
                 ${p.moodLabel ? `<div style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:14px;font-size:11px;font-weight:600;margin-bottom:6px;${moodStyle}">${this._escapeHtml(p.moodLabel)}</div>` : ''}
                 <div style="font-size:14px;color:#0F1419;line-height:1.55;margin-bottom:4px;word-break:break-word">${this._renderCommunityText(p.text)}</div>
-                ${this._communityImgHtml(p)}
                 <div style="display:flex;gap:8px;margin-top:4px;margin-left:-8px">
                     <div style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;color:#536471;cursor:pointer">💬 ${replies.length}</div>
                     <div style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;color:#536471;cursor:pointer">🔁 0</div>
