@@ -1,5 +1,5 @@
 // 🐾 Paw Map — llm-helper.js (Connection Profile + Vertex AI Express)
-// v0.9.57: llmMode='profile'(ST 연결 프로필) | 'direct'(Vertex Express 키 + Google Search)
+// v0.9.58: llmMode='profile'(ST 연결 프로필) | 'direct'(Vertex Express 키 + Google Search)
 // 동의 시스템(externalAiEnabled/shareRpData)은 두 모드 모두에 적용됨
 
 import { getContext, extension_settings } from '../../../extensions.js';
@@ -506,7 +506,7 @@ async function _callVertexApiKey(apiKey, model, prompt) {
             const queryCount = Array.isArray(metadata.webSearchQueries) ? metadata.webSearchQueries.length
                 : Array.isArray(metadata.web_search_queries) ? metadata.web_search_queries.length : 0;
             _lastGroundingSummary = {
-                used: chunkCount > 0,
+                used: chunkCount > 0 || supportCount > 0 || queryCount > 0,
                 chunkCount,
                 supportCount,
                 queryCount,

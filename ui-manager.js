@@ -353,7 +353,7 @@ export class UIManager {
     createSettingsPanel() {
         const html = `<div id="wt-settings" class="wt-settings"><div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.57-beta</span></b>
+                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.58-beta</span></b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div><div class="inline-drawer-content">
                 <div style="font-size:12px;font-weight:800;margin:2px 0 7px">기본 설정</div>
@@ -5342,14 +5342,15 @@ ${trimmed.substring(0, 1500)}`;
 
 [규칙]
 - 검색은 필요한 만큼만, 가능하면 1~2개 검색어로 끝낸다.
-- 동명 장소를 주소와 대조한다. 정확히 같은 장소인지 불확실하면 matched=false.
-- 실제 방문자가 피드에 쓸 만한 고유 특징·대표 시설·메뉴·공간·주변 지역 특색을 3~6개 찾는다.
+- 동명 장소를 주소와 대조하되, 정확한 지점을 못 찾으면 같은 이름이나 주소의 주변 지역 정보로 보완한다.
+- exact/area/name_only 중 가능한 범위를 표시하고, 쓸 만한 장소·지역 정보가 전혀 없을 때만 matched=false로 둔다.
+- 실제 방문자가 피드에 쓸 만한 고유 특징·대표 시설·메뉴·공간·주변 지역 특색을 2~6개 찾는다.
 - 가격·영업시간·행사는 최신 근거가 확실할 때만 포함한다.
 - 검색에서 확인되지 않은 내용은 만들지 않는다.
 - URL, 검색어, 설명문은 출력하지 않는다.
 
 JSON만 출력:
-{"matched":true,"canonicalName":"정식 장소명","region":"도시·국가","confidence":"high|medium|low","facts":[{"text":"검색으로 확인된 구체적 사실","kind":"feature|food|space|local|tip|current"}]}`;
+{"matched":true,"matchLevel":"exact|area|name_only","canonicalName":"정식 장소명 또는 검색된 이름","region":"도시·국가","facts":[{"text":"검색하거나 확인한 구체적 장소·지역 정보","kind":"feature|food|space|local|tip|current"}]}`;
 
                 let researchResult = null;
                 try {
@@ -5362,20 +5363,22 @@ JSON만 출력:
 
                 const groundingSummary = getLastGroundingSummary();
                 const research = parseLLMJson(researchResult || '');
-                const confident = ['high', 'medium'].includes(String(research?.confidence || '').toLowerCase());
-                if (groundingSummary?.used === true && research?.matched === true && confident && Array.isArray(research.facts)) {
+                // Google 도구가 검색 근거를 줬거나 조사 응답에 쓸 만한 사실이 있으면 사용한다.
+                // matched/confidence 문자열 형태 차이로 전체 결과를 버리지 않는다.
+                if (Array.isArray(research?.facts)) {
                     groundedFacts = research.facts.slice(0, 6).map((fact, index) => ({
                         id: `F${index + 1}`,
                         text: this._plainText(typeof fact === 'string' ? fact : fact?.text, 240),
                         kind: this._plainText(typeof fact === 'object' ? fact?.kind : 'feature', 30),
-                    })).filter(fact => fact.text.length >= 8);
+                    })).filter(fact => fact.text.length >= 4);
                     groundingSourceCount = Number(groundingSummary.chunkCount) || 0;
                 }
 
                 if (groundedFacts.length) {
                     toastSuccess(`⭐ 실제 장소 정보 ${groundedFacts.length}개 확인${groundingSourceCount ? ` · 검색 근거 ${groundingSourceCount}개` : ''} · 피드 만드는 중…`);
                 } else {
-                    toastWarn('⚠️ 정확한 실제 장소 정보를 확인하지 못해 기본 피드로 생성합니다.');
+                    const searchSignal = groundingSummary?.used ? '검색은 실행됐지만 쓸 정보가 없어서' : '쓸 만한 장소 정보를 찾지 못해';
+                    toastWarn(`⚠️ ${searchSignal} 기본 피드로 생성합니다.`);
                 }
             }
 
@@ -5799,16 +5802,16 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                 return;
             }
 
-            // 실제 정보 모드에서는 모델이 factIds로 밝힌 반영 포스트 수를 검사한다.
-            // 부족할 때만 한 번 재생성하며, 세 번째 호출을 상시 발생시키지 않는다.
+            // factIds는 반영을 돕는 안내 장치다. 하나도 없을 때만 한 번 재생성하고,
+            // 다시 부족해도 결과 전체를 폐기하지 않는다.
             let groundedPostCount = 0;
             if (groundedFacts.length) {
                 const validFactIds = new Set(groundedFacts.map(fact => fact.id));
                 const countGroundedPosts = posts => posts.filter(post => Array.isArray(post?.factIds) && post.factIds.some(id => validFactIds.has(String(id)))).length;
                 const requiredGroundedPosts = Math.max(2, Math.ceil(parsed.posts.length / 2));
                 groundedPostCount = countGroundedPosts(parsed.posts);
-                if (groundedPostCount < requiredGroundedPosts) {
-                    toastWarn(`⭐ 실제 정보 반영이 ${groundedPostCount}/${requiredGroundedPosts}개라 한 번 다시 생성합니다.`);
+                if (groundedPostCount === 0) {
+                    toastWarn(`⭐ 실제 정보 표시가 빠져 한 번 다시 생성합니다. 목표 ${requiredGroundedPosts}개`);
                     const retryResult = await callLLM(`${prompt}\n\n[재생성 지시] 직전 출력은 실제 장소 정보 반영량이 부족했다. 최소 ${requiredGroundedPosts}개 포스트가 GOOGLE_PLACE_FACTS의 구체적 사실을 본문에 자연스럽게 사용하고 올바른 factIds를 반드시 표시해야 한다.`, { maxTokens: gen.maxTokens });
                     if (!chatGuard()) { toastWarn('채팅이 바뀌어 생성 결과를 저장하지 않았습니다.'); return false; }
                     const retryParsed = parseLLMJson(retryResult || '');
@@ -5817,12 +5820,6 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                         parsed = retryParsed;
                         groundedPostCount = countGroundedPosts(parsed.posts);
                     }
-                }
-                const finalRequired = Math.max(2, Math.ceil(parsed.posts.length / 2));
-                if (groundedPostCount < finalRequired) {
-                    window._wtLastErrorType = 'grounding_not_applied';
-                    toastWarn('⚠️ 실제 장소 정보 반영을 확인하지 못해 기존 피드를 유지합니다.');
-                    return false;
                 }
             }
             if (parsed.posts.length === 0) {
