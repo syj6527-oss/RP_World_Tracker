@@ -48,6 +48,7 @@ export class UIManager {
         this._communityPhotoBlobCache = new Map();
         this._communityPhotoPending = new Map();
         this._communityPhotoObserver = null;
+        this._communityPhotoFailureNotified = false;
         // Persistent/global debug capture is intentionally disabled in the secure build.
         this._debugEnabled = false;
         this.detectionCandidates = null;
@@ -359,7 +360,7 @@ export class UIManager {
     createSettingsPanel() {
         const html = `<div id="wt-settings" class="wt-settings"><div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.60-beta</span></b>
+                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.61-beta</span></b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div><div class="inline-drawer-content">
                 <div style="font-size:12px;font-weight:800;margin:2px 0 7px">기본 설정</div>
@@ -593,7 +594,7 @@ export class UIManager {
                     toastWarn('구글 검색은 Vertex 키를 저장한 뒤 사용할 수 있어요.');
                     $('#wt-s-enrich').val('off');
                     s.locationEnrichment = 'off';
-                } else if (!confirm('실제 장소 정보를 찾기 위해 장소명과 저장된 주소가 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. 장소 사진이 표시되면 공개 장소 사진 단서와 IP가 Pollinations에 전달됩니다. RP 채팅은 Google 검색·사진 생성 단계에 보내지 않습니다. 계속할까요?')) {
+                } else if (!confirm('실제 장소 정보를 찾기 위해 장소명과 저장된 주소가 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. 장소 사진이 표시되면 공개 장소·인근 가게/명소 이름과 사진 단서, IP가 Pollinations에 전달됩니다. RP 채팅은 Google 검색·사진 생성 단계에 보내지 않습니다. 계속할까요?')) {
                     $('#wt-s-enrich').val('off');
                     s.locationEnrichment = 'off';
                 } else {
@@ -5221,7 +5222,7 @@ ${trimmed.substring(0, 1500)}`;
             overlay.find('#wt-community-mode-grounding').on('click', () => {
                 if (!groundingAvail) return;
                 const settings = extension_settings[EXTENSION_NAME];
-                if (settings.locationEnrichment !== 'grounding' && !confirm('실제 장소 정보를 찾기 위해 장소명과 저장된 주소가 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. 장소 사진이 표시되면 공개 장소 사진 단서와 IP가 Pollinations에 전달됩니다. RP 채팅은 Google 검색·사진 생성 단계에 보내지 않습니다. 계속할까요?')) return;
+                if (settings.locationEnrichment !== 'grounding' && !confirm('실제 장소 정보를 찾기 위해 장소명과 저장된 주소가 Google에 전송되고, 연결된 Vertex 계정의 사용량·크레딧이 소모될 수 있어요. 장소 사진이 표시되면 공개 장소·인근 가게/명소 이름과 사진 단서, IP가 Pollinations에 전달됩니다. RP 채팅은 Google 검색·사진 생성 단계에 보내지 않습니다. 계속할까요?')) return;
                 settings.locationEnrichment = 'grounding';
                 $('#wt-s-enrich').val('grounding');
                 saveSettingsDebounced();
@@ -5338,6 +5339,7 @@ ${trimmed.substring(0, 1500)}`;
             // Google 모드는 장소 조사와 피드 생성을 분리한다.
             // 검색 단계에는 장소명·주소만 보내며 RP 채팅·인물·사건은 포함하지 않는다.
             let groundedFacts = [];
+            let groundedNearbyPlaces = [];
             let groundedPhotoCues = [];
             let groundedCanonicalName = '';
             let groundedRegion = '';
@@ -5351,23 +5353,27 @@ ${trimmed.substring(0, 1500)}`;
 주소: ${this._plainText(loc.address || '주소 없음', 240)}
 
 [규칙]
-- 검색은 필요한 만큼만, 가능하면 1~2개 검색어로 끝낸다.
+- 장소 본체와 주소 주변을 나눠 2~4개 검색어로 확인한다. 주변 검색에는 식당·카페·상점·명소·공원·역·건물 이름을 포함한다.
 - 동명 장소를 주소와 대조하되, 정확한 지점을 못 찾으면 같은 이름이나 주소의 주변 지역 정보로 보완한다.
 - exact/area/name_only 중 가능한 범위를 표시하고, 쓸 만한 장소·지역 정보가 전혀 없을 때만 matched=false로 둔다.
-- 실제 방문자가 피드에 쓸 만한 고유 특징·대표 시설·메뉴·공간·주변 지역 특색을 2~6개 찾는다.
+- 장소 자체의 고유 특징·대표 시설·메뉴·공간·지역 특색을 facts에 2~6개 찾는다.
+- nearbyPlaces에는 주소 주변에서 실제로 확인되는 가게·카페·식당·명소·공원·역·건물의 정확한 고유명사를 3~8개 찾는다.
+- nearbyPlaces의 name은 검색에서 확인된 정식 이름을 그대로 쓰고, detail에는 그 장소의 확인된 메뉴·시설·특징 중 하나를 적는다.
+- relation은 인접·건물 내부·같은 거리·도보권 등 검색 근거로 확인되는 관계만 적는다. 거리·방향을 추측하지 않는다.
+- 정확한 고유명사나 현재 영업 여부가 확인되지 않는 곳은 nearbyPlaces에서 제외한다. 가상의 상호를 만들지 않는다.
 - 가격·영업시간·행사는 최신 근거가 확실할 때만 포함한다.
 - 검색에서 확인되지 않은 내용은 만들지 않는다.
-- 사진용 단서 photoCues는 검색으로 확인한 공개 장소·풍경·음식·공간만 짧은 영어 문장으로 2~4개 작성한다.
+- 사진용 단서 photoCues는 검색으로 확인한 공개 장소·인근 고유명사·풍경·음식·공간만 짧은 영어 문장으로 2~4개 작성한다.
 - photoCues에 사람 이름, 대화, 개인 정보, URL, API 키를 넣지 않는다.
 - URL, 검색어, 설명문은 출력하지 않는다.
 
 JSON만 출력:
-{"matched":true,"matchLevel":"exact|area|name_only","canonicalName":"정식 장소명 또는 검색된 이름","region":"도시·국가","facts":[{"text":"검색하거나 확인한 구체적 장소·지역 정보","kind":"feature|food|space|local|tip|current"}],"photoCues":["short English description of a verified public view or detail"]}`;
+{"matched":true,"matchLevel":"exact|area|name_only","canonicalName":"정식 장소명 또는 검색된 이름","region":"도시·국가","facts":[{"text":"검색으로 확인한 구체적 장소·지역 정보","kind":"feature|food|space|local|tip|current"}],"nearbyPlaces":[{"name":"검색으로 확인한 정확한 고유명사","type":"restaurant|cafe|shop|landmark|park|station|building|other","detail":"확인된 메뉴·시설·특징 하나","relation":"확인된 인접 관계 또는 빈 문자열"}],"photoCues":["short English description of a verified public view or detail"]}`;
 
                 let researchResult = null;
                 try {
                     window._wtUseGrounding = true;
-                    researchResult = await callLLM(researchPrompt, { maxTokens: 1280, temperature: 0.2, timeoutMs: 90000 });
+                    researchResult = await callLLM(researchPrompt, { maxTokens: 2048, temperature: 0.2, timeoutMs: 90000 });
                 } finally {
                     window._wtUseGrounding = false;
                 }
@@ -5377,31 +5383,54 @@ JSON만 출력:
                 const research = parseLLMJson(researchResult || '');
                 // Google 도구가 검색 근거를 줬거나 조사 응답에 쓸 만한 사실이 있으면 사용한다.
                 // matched/confidence 문자열 형태 차이로 전체 결과를 버리지 않는다.
-                if (Array.isArray(research?.facts)) {
+                if (Array.isArray(research?.facts) || Array.isArray(research?.nearbyPlaces)) {
                     groundedCanonicalName = this._safePublicPhotoText(research?.canonicalName, 100);
                     groundedRegion = this._safePublicPhotoText(research?.region, 100);
-                    groundedFacts = research.facts.slice(0, 6).map((fact, index) => ({
-                        id: `F${index + 1}`,
-                        text: this._plainText(typeof fact === 'string' ? fact : fact?.text, 240),
-                        kind: this._plainText(typeof fact === 'object' ? fact?.kind : 'feature', 30),
-                    })).filter(fact => fact.text.length >= 4);
+                    groundedFacts = (Array.isArray(research?.facts) ? research.facts : []).slice(0, 6).map((fact, index) => {
+                        const kind = this._plainText(typeof fact === 'object' ? fact?.kind : 'feature', 30);
+                        return {
+                            id: `F${index + 1}`,
+                            text: this._safePublicPhotoText(typeof fact === 'string' ? fact : fact?.text, 240),
+                            kind: ['feature', 'food', 'space', 'local', 'tip', 'current'].includes(kind) ? kind : 'feature',
+                        };
+                    }).filter(fact => fact.text.length >= 4);
+                    const nearbySeen = new Set();
+                    groundedNearbyPlaces = (Array.isArray(research?.nearbyPlaces) ? research.nearbyPlaces : []).slice(0, 8).map((place, index) => {
+                        const name = this._safePublicPhotoText(place?.name, 120);
+                        const detail = this._safePublicPhotoText(place?.detail, 180);
+                        const relation = this._safePublicPhotoText(place?.relation, 100);
+                        const rawType = this._plainText(place?.type || 'other', 30);
+                        const type = ['restaurant', 'cafe', 'shop', 'landmark', 'park', 'station', 'building', 'other'].includes(rawType) ? rawType : 'other';
+                        const dedupeKey = name.normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, '');
+                        if (name.length < 2 || detail.length < 4 || nearbySeen.has(dedupeKey)) return null;
+                        nearbySeen.add(dedupeKey);
+                        return {
+                            id: `P${index + 1}`,
+                            name,
+                            type,
+                            relation,
+                            text: `${name}${relation ? ` (${relation})` : ''}: ${detail}`,
+                            kind: 'nearby',
+                        };
+                    }).filter(Boolean);
                     groundedPhotoCues = Array.isArray(research?.photoCues)
                         ? research.photoCues.slice(0, 4).map(cue => this._safePublicPhotoText(cue, 180)).filter(Boolean)
                         : [];
                     groundingSourceCount = Number(groundingSummary?.chunkCount) || 0;
                 }
 
-                if (groundedFacts.length) {
-                    toastSuccess(`⭐ 실제 장소 정보 ${groundedFacts.length}개 확인${groundingSourceCount ? ` · 검색 근거 ${groundingSourceCount}개` : ''} · 피드 만드는 중…`);
+                if (groundedFacts.length || groundedNearbyPlaces.length) {
+                    toastSuccess(`⭐ 장소 정보 ${groundedFacts.length}개 · 인근 실명 ${groundedNearbyPlaces.length}개 확인${groundingSourceCount ? ` · 검색 근거 ${groundingSourceCount}개` : ''} · 피드 만드는 중…`);
                 } else {
                     const searchSignal = groundingSummary?.used ? '검색은 실행됐지만 쓸 정보가 없어서' : '쓸 만한 장소 정보를 찾지 못해';
                     toastWarn(`⚠️ ${searchSignal} 기본 피드로 생성합니다.`);
                 }
             }
 
-            const groundedFactContext = groundedFacts.length ? `
+            const groundedItems = [...groundedFacts, ...groundedNearbyPlaces];
+            const groundedFactContext = groundedItems.length ? `
 [GOOGLE_PLACE_FACTS_BEGIN — 검색으로 확인한 장소 정보]
-${groundedFacts.map(fact => `${fact.id} (${fact.kind}): ${fact.text}`).join('\n')}
+${groundedItems.map(fact => `${fact.id} (${fact.kind}): ${fact.text}`).join('\n')}
 [GOOGLE_PLACE_FACTS_END]
 
 ⭐ 실제 정보 반영 필수 규칙:
@@ -5410,6 +5439,8 @@ ${groundedFacts.map(fact => `${fact.id} (${fact.kind}): ${fact.text}`).join('\n'
 - 실제 정보를 사용한 포스트에는 factIds 배열로 사용한 번호를 표시한다. 예: "factIds":["F1"]
 - 실제 정보를 쓰지 않은 포스트는 "factIds":[]로 표시한다.
 - 검색 정보에 없는 메뉴·시설·가격·영업시간을 실제 사실처럼 추가하지 않는다.
+- P 번호 정보는 인근 실명 장소다. 인근 실명이 있으면 장소 기반 글 중 2~3개에는 해당 고유명사를 철자까지 정확히 본문에 넣는다.
+- "동네 카페", "근처 식당", "주변 명소"로 뭉개지 말고 P 번호의 실명을 사용한다. 확인된 실명이 없을 때만 일반 표현을 쓴다.
 - 이 factIds는 내부 검증용이며 트윗 본문에 F1 같은 번호를 쓰지 않는다.
 ` : '';
 
@@ -5428,11 +5459,13 @@ ${groundedFacts.map(fact => `${fact.id} (${fact.kind}): ${fact.text}`).join('\n'
 본문은 순수 텍스트로만 작성. HTML, Markdown 링크, 이미지 URL, 외부 리소스, 스크립트는 절대 출력하지 말 것.
 모든 문자열은 JSON에 맞게 이스케이프하고, 유효한 JSON 객체 하나만 출력할 것.
 
-자연스러운 실제 SNS 피드처럼 써라.
-- 대부분은 담백한 관찰·짧은 후기·혼잣말이고, 강한 호들갑은 전체에서 1~2개만 허용한다.
-- 모든 글을 "미친/헐/와/방금"으로 시작하지 말고, ㅋㅋ·ㅠㅠ·해시태그·감탄부호를 매 글마다 넣지 않는다.
-- 같은 시작어·종결어미·핸들·비유·정보를 반복하지 않는다.
-- 광고 문구나 관광 안내문처럼 정보를 나열하지 말고, 포스트 하나에는 구체적 디테일 하나만 자연스럽게 녹인다.
+완성된 리뷰가 아니라 한국 여성 이용자가 많은 X·익명 커뮤니티에 각자 냅다 쓴 글처럼 써라.
+- 한 줄 반응, 끊긴 혼잣말, 건조한 단정, 정보 공유, 장문 급발진의 길이와 리듬을 섞는다.
+- 모든 문장을 반듯하게 완결하지 않는다. 한국어 출력에서는 반말·음슴체·초성·의도적인 띄어쓰기 생략·가벼운 오타를 일부 글에만 허용한다.
+- "아니/걍/개/존나/미친/ㅋㅋ/ㅠㅠ" 같은 표현은 필요한 화자만 선택적으로 쓴다. 전부 같은 유행어를 복붙하지 않는다.
+- 욕설은 상황이나 자기 감정의 감탄사로만 제한한다. 특정 사람·집단을 향한 혐오·비하·괴롭힘이나 확인되지 않은 범죄 주장은 금지한다.
+- "분위기가 좋다", "생각보다 좋다", "예술이다", "남길 게 없다", "힐링된다", "추천한다" 같은 정돈된 AI 리뷰 상투어를 반복하지 않는다.
+- 광고·관광 안내문처럼 정보를 나열하지 말고, 포스트 하나에는 구체적 디테일 하나만 말투 속에 녹인다.
 - 화자는 서로 다른 방문객·주민·직장인·학생·관광객 등으로 보이게 한다.
 
 장소: "${loc.name}"${loc.memo ? ` (${loc.memo.substring(0,80)})` : ''}${loc.address ? ` · ${loc.address.substring(0,60)}` : ''}
@@ -5470,6 +5503,16 @@ ${recentChat ? `\n[최근 RP 맥락 — 현재 장소와 직접 이어질 때만
 - "animal": 동물 시점
 - imagePrompt나 이미지 URL은 출력하지 않는다. 사진은 확장이 공개 장소 조사 결과로 별도 처리한다.
 
+각 포스트에는 voice도 반드시 넣고 아래 6종 중 하나를 쓴다.
+- "dry": 짧고 건조하게 결론만 툭 던짐
+- "rant": 문장이 길어지며 혼자 급발진하거나 투덜거림
+- "burst": 감탄·당황·오열 같은 한두 줄 즉시 반응
+- "chatty": 친구에게 말 걸 듯 사담과 질문이 섞임
+- "soft": 조용한 일기·애정·감동이지만 문학적으로 꾸미지 않음
+- "info": 가격·메뉴·동선·장소 팁을 생활 말투로 공유
+- 전체에서 최소 4종을 사용하고 같은 voice는 최대 2개까지만 쓴다.
+- 같은 첫 단어로 시작하는 글은 최대 2개, 같은 종결어미가 연속되지 않게 한다.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━
 🏛️ 해당 장소 특화 트윗 (⭐ 최우선 핵심 기능!) 
 ━━━━━━━━━━━━━━━━━━━━━━━━
@@ -5495,7 +5538,7 @@ ${recentChat ? `\n[최근 RP 맥락 — 현재 장소와 직접 이어질 때만
 - 이름과 핸들은 짧고 서로 겹치지 않는 SNS 닉네임으로 만든다.
 - avatar는 화자나 장소에 맞는 이모지 하나만 사용한다.
 - 사람이면 type:"anon", 동물이면 type:"animal"이다.
-- 담백한 관찰·짧은 후기·작은 불평·가벼운 감탄을 섞고, 동물 글은 짧고 과하게 귀엽게 쓰지 않는다.
+- 닉네임뿐 아니라 문장 길이·어휘·감정 온도도 서로 다르게 만든다. 동물 글은 짧고 과하게 귀엽게 쓰지 않는다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 🌍 현지 색깔 — 지역·문화 특색 필수 반영!
@@ -5509,8 +5552,9 @@ ${recentChat ? `\n[최근 RP 맥락 — 현재 장소와 직접 이어질 때만
 📏 포맷·말투 규칙
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-- 포스트는 1~3문장으로 짧게 쓴다. 긴 ㅋ·ㅠㅠ, 유행어, 밈은 필요할 때만 쓴다.
-- 혐오 표현·성별 비하·일베/디시 말투·직접적인 욕설은 사용하지 않는다.
+- 대부분은 1~3문장이지만 burst는 한 구절만, rant는 한 번 정도 더 길어져도 된다.
+- 긴 ㅋ·ㅠㅠ, 초성, 욕설, 밈은 화자별로 분산하고 한 피드 전체가 같은 장치에 의존하지 않는다.
+- 혐오 표현·성별 비하·일베/디시 말투·특정인을 겨냥한 모욕은 사용하지 않는다.
 - 메타 내레이션과 *행동* 형식은 쓰지 않는다.
 - 한국어에서는 "어떡해/어떻게", "안 돼", "됐어"를 문맥에 맞게 쓴다.
 
@@ -5545,8 +5589,8 @@ JSON 출력 예시 — **이건 형식/구조만 참고해. 내용은 절대 따
 (아래 [플레이스홀더]는 실제로는 이 장소의 나라/지역 특색으로 교체)
 
 {"posts":[
-  {"name":"[장소방문객]","handle":"@[서로다른_핸들]","avatar":"[이모지1개]","type":"anon","source":"place","mood":"chill","moodLabel":"😌 느긋","text":"[확인된 장소 디테일 하나를 자연스럽게 쓴 짧은 글]","likes":8,"factIds":["F1"],"replies":[]},
-  {"name":"[목격자닉]","handle":"@[서로다른_핸들]","avatar":"👀","type":"anon","source":"chat","mood":"excited","moodLabel":"👀 목격","text":"[현재 장소와 이어지는 최근 RP 장면의 짧은 목격담]","likes":5,"factIds":[],"replies":[{"name":"[답글닉]","handle":"@[핸들]","avatar":"💭","text":"[짧고 자연스러운 답글]"}]}
+  {"name":"[장소방문객]","handle":"@[서로다른_핸들]","avatar":"[이모지1개]","type":"anon","source":"place","voice":"dry","mood":"chill","moodLabel":"😌 느긋","text":"[확인된 장소 디테일 하나를 자연스럽게 쓴 짧은 글]","likes":8,"factIds":["F1"],"replies":[]},
+  {"name":"[목격자닉]","handle":"@[서로다른_핸들]","avatar":"👀","type":"anon","source":"chat","voice":"burst","mood":"excited","moodLabel":"👀 목격","text":"[현재 장소와 이어지는 최근 RP 장면의 짧은 목격담]","likes":5,"factIds":[],"replies":[{"name":"[답글닉]","handle":"@[핸들]","avatar":"💭","text":"[짧고 자연스러운 답글]"}]}
 ]}
 
 위 예시는 구조만 참고하고 현재 장소와 맥락에 맞는 새 내용으로 작성한다.
@@ -5584,24 +5628,57 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
 
             // 60~70% 비율을 실제 결과에서 검사한다. 실패하면 결과를 버리지 않고
             // 같은 공급자에 한 번만 구조 교정을 요청한다.
-            const validFactIds = new Set(groundedFacts.map(fact => fact.id));
+            const validFactIds = new Set(groundedItems.map(fact => fact.id));
+            const nearbyById = new Map(groundedNearbyPlaces.map(place => [place.id, place]));
+            const allowedVoices = ['dry', 'rant', 'burst', 'chatty', 'soft', 'info'];
+            const normalizedName = value => String(value || '').normalize('NFKC').toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
             const mixStats = posts => {
                 const usable = (Array.isArray(posts) ? posts : []).slice(0, 12).filter(post => post && post.text);
                 const total = usable.length;
                 const targetTotal = total ? Math.max(gen.min, Math.min(gen.max, total)) : gen.min;
                 const targetPlace = Math.round(targetTotal * 0.65);
                 const isGrounded = post => Array.isArray(post?.factIds) && post.factIds.some(id => validFactIds.has(String(id)));
+                const usesNamedPlace = post => {
+                    const body = normalizedName(post?.text);
+                    return Array.isArray(post?.factIds) && post.factIds.some(id => {
+                        const place = nearbyById.get(String(id));
+                        return place && body.includes(normalizedName(place.name));
+                    });
+                };
                 const placeCount = usable.filter(post => post?.source === 'place' || isGrounded(post)).length;
-                const groundedCount = groundedFacts.length ? usable.filter(isGrounded).length : placeCount;
+                const groundedCount = groundedItems.length ? usable.filter(isGrounded).length : placeCount;
+                const targetNamed = groundedNearbyPlaces.length ? Math.min(targetPlace, groundedNearbyPlaces.length, 3) : 0;
+                const namedCount = usable.filter(usesNamedPlace).length;
+                const voiceCounts = new Map();
+                const openingCounts = new Map();
+                for (const post of usable) {
+                    const voice = allowedVoices.includes(post?.voice) ? post.voice : '';
+                    if (voice) voiceCounts.set(voice, (voiceCounts.get(voice) || 0) + 1);
+                    const opening = String(post?.text || '').normalize('NFKC').toLocaleLowerCase()
+                        .replace(/^[\s\p{P}\p{S}]+/gu, '').split(/\s+/)[0]?.slice(0, 8) || '';
+                    if (opening) openingCounts.set(opening, (openingCounts.get(opening) || 0) + 1);
+                }
+                const voiceTarget = Math.min(4, targetTotal);
+                const voiceDiversity = voiceCounts.size;
+                const maxVoiceCount = Math.max(0, ...voiceCounts.values());
+                const maxOpeningCount = Math.max(0, ...openingCounts.values());
+                const tonePenalty = Math.max(0, voiceTarget - voiceDiversity)
+                    + Math.max(0, maxVoiceCount - 2)
+                    + Math.max(0, maxOpeningCount - 2);
                 const placeRatio = total ? placeCount / total : 0;
-                const score = Math.abs(total - targetTotal) + Math.abs(placeCount - targetPlace) + Math.max(0, targetPlace - groundedCount);
+                const score = Math.abs(total - targetTotal)
+                    + Math.abs(placeCount - targetPlace)
+                    + Math.max(0, targetPlace - groundedCount)
+                    + Math.max(0, targetNamed - namedCount)
+                    + tonePenalty;
                 const ratioOk = placeRatio >= 0.6 && placeRatio <= 0.7;
-                return { total, targetTotal, targetPlace, placeCount, groundedCount, placeRatio, score, ok: total === targetTotal && ratioOk && placeCount === targetPlace && groundedCount >= targetPlace };
+                const toneOk = voiceDiversity >= voiceTarget && maxVoiceCount <= 2 && maxOpeningCount <= 2;
+                return { total, targetTotal, targetPlace, placeCount, groundedCount, targetNamed, namedCount, voiceDiversity, maxVoiceCount, maxOpeningCount, placeRatio, score, ok: total === targetTotal && ratioOk && placeCount === targetPlace && groundedCount >= targetPlace && namedCount >= targetNamed && toneOk };
             };
             let stats = mixStats(parsed.posts);
             if (!stats.ok && stats.total > 0) {
-                toastWarn(`피드 비율 조정 중… 장소 ${stats.placeCount}/${stats.targetPlace}개`);
-                const correctionPrompt = `${prompt}\n\n[비율 교정]\n총 ${stats.targetTotal}개를 정확히 출력한다. source:\"place\"는 정확히 ${stats.targetPlace}개, 나머지는 정확히 ${stats.targetTotal - stats.targetPlace}개다. ${groundedFacts.length ? `place 글 ${stats.targetPlace}개 모두 GOOGLE_PLACE_FACTS의 실제 정보를 사용하고 올바른 factIds를 넣는다.` : 'place 글은 현재 장소 자체나 저장된 장소 맥락을 구체적으로 다룬다.'} 말투와 시작 표현을 서로 반복하지 않는다.`;
+                toastWarn(`피드 구성 조정 중… 장소 ${stats.placeCount}/${stats.targetPlace} · 인근 실명 ${stats.namedCount}/${stats.targetNamed}`);
+                const correctionPrompt = `${prompt}\n\n[구성 교정]\n총 ${stats.targetTotal}개를 정확히 출력한다. source:\"place\"는 정확히 ${stats.targetPlace}개, 나머지는 정확히 ${stats.targetTotal - stats.targetPlace}개다. ${groundedItems.length ? `place 글 ${stats.targetPlace}개 모두 GOOGLE_PLACE_FACTS의 실제 정보를 사용하고 올바른 factIds를 넣는다.` : 'place 글은 현재 장소 자체나 저장된 장소 맥락을 구체적으로 다룬다.'} ${stats.targetNamed ? `그중 최소 ${stats.targetNamed}개는 P 번호의 인근 고유명사를 철자 그대로 본문에 넣는다.` : ''} voice는 최소 4종, 같은 voice는 최대 2개만 쓰며 같은 첫 단어를 세 번 이상 반복하지 않는다. 말투·길이·종결을 서로 다르게 한다.`;
                 const retryResult = await callLLM(correctionPrompt, { maxTokens: gen.maxTokens });
                 if (!chatGuard()) { toastWarn('채팅이 바뀌어 생성 결과를 저장하지 않았습니다.'); return false; }
                 const retryParsed = parseLLMJson(retryResult || '');
@@ -5620,7 +5697,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
             }
 
             // 모델 응답을 모두 검증한 뒤에만 기존 피드를 교체한다.
-            const cleanPosts = parsed.posts.slice(0, 12).map(p => {
+            const cleanPosts = parsed.posts.slice(0, 12).map((p, postIndex) => {
                 if (!p || !p.text) return null;
                 const safeText = this._plainText(p.text, 800);
                 if (!safeText) return null;
@@ -5634,7 +5711,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                     avatar: this._firstGrapheme(r.avatar || '👤'),
                     text: this._plainText(r.text, 200),
                 })) : [];
-                const factIds = Array.isArray(p.factIds) ? p.factIds.slice(0, 12).map(id => this._plainText(id, 20)).filter(Boolean) : [];
+                const factIds = Array.isArray(p.factIds) ? p.factIds.slice(0, 12).map(id => this._plainText(id, 20)).filter(id => validFactIds.has(id)) : [];
                 const usesVerifiedFact = factIds.some(id => validFactIds.has(id));
                 const source = usesVerifiedFact
                     ? 'place'
@@ -5645,6 +5722,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                     avatar: this._firstGrapheme(p.avatar || '👤'),
                     type: ['anon', 'animal'].includes(p.type) ? p.type : 'anon',
                     source,
+                    voice: allowedVoices.includes(p.voice) ? p.voice : allowedVoices[postIndex % allowedVoices.length],
                     mood: this._plainText(p.mood || '', 30),
                     moodLabel: this._plainText(p.moodLabel || '', 40),
                     imagePrompt: '',
@@ -5662,11 +5740,11 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                 toastWarn('⚠️ 유효한 커뮤니티 글이 없어 기존 피드를 유지합니다.');
                 return false;
             }
-            if (enrichMode === 'grounding' && groundedFacts.length) {
+            if (enrichMode === 'grounding' && groundedItems.length) {
                 this._attachGroundedPhotoPrompts(cleanPosts, {
                     canonicalName: groundedCanonicalName,
                     region: groundedRegion,
-                    facts: groundedFacts,
+                    facts: groundedItems,
                     photoCues: groundedPhotoCues,
                 });
             }
@@ -5676,8 +5754,8 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
             for (const post of cleanPosts) {
                 await this.lm.addCommunityPost(locId, post);
             }
-            toastSuccess(groundedFacts.length
-                ? `⭐ 실제 정보 ${groundedFacts.length}개 · 피드 ${cleanPosts.length}개 생성!`
+            toastSuccess(groundedItems.length
+                ? `⭐ 실제 정보 ${groundedFacts.length}개 · 인근 실명 ${groundedNearbyPlaces.length}개 · 피드 ${cleanPosts.length}개 생성!`
                 : `💬 ${cleanPosts.length}개 반응 생성!`);
             this.pi?.inject();
             // r13: 오버레이가 열려있으면 바텀시트 재렌더 생략 (race condition 방지)
@@ -6072,19 +6150,23 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
             const base = context === 'community' ? 'Write ALL output in Korean (casual 반말 트위터 톤).'
                        : context === 'review'    ? 'Write ALL reviews in Korean.'
                        :                           'Write ALL output in Korean.';
-            return base + koSpellGuide;
+            return context === 'community'
+                ? base + ' Intentional internet shorthand, fragments, spacing variation, and a few light typos are allowed when they fit the assigned voice.'
+                : base + koSpellGuide;
         }
         if (lang === 'en') {
             return context === 'community' ? 'Write ALL output in English (casual Twitter tone).'
                  : context === 'review'    ? 'Write ALL reviews in English.'
                  :                           'Write ALL output in English.';
         }
-        // auto — 더 명확한 판단 기준 제공 + 한국어일 때 맞춤법 가이드도 (LLM이 한국어 선택했을 때만 적용됨)
-        return 'LANGUAGE: Match the dominant language of the recent RP context. '
+        // auto — 커뮤니티는 의도적인 인터넷 구어체를 허용하고, 나머지만 맞춤법 가이드를 적용한다.
+        const autoBase = 'LANGUAGE: Match the dominant language of the recent RP context. '
              + 'If RP is primarily in Korean (한글 많음) → write in Korean. '
              + 'If RP is primarily in English (alphabet many) → write in English. '
-             + 'If mixed or unclear → default to Korean. Never mix languages within a single post.'
-             + koSpellGuide;
+             + 'If mixed or unclear → default to Korean. Never mix languages within a single post.';
+        return context === 'community'
+            ? autoBase + ' For Korean community posts, intentional shorthand, fragments, spacing variation, and a few light typos are allowed.'
+            : autoBase + koSpellGuide;
     }
 
     // v0.9.0: 이모지/멀티바이트 문자의 첫 grapheme만 추출 (아바타 overflow 방지)
@@ -6235,23 +6317,35 @@ Respond with ONLY a JSON object, no markdown, no explanation:
     _attachGroundedPhotoPrompts(posts, publicContext = {}) {
         if (!Array.isArray(posts) || !posts.length) return;
         const facts = Array.isArray(publicContext.facts) ? publicContext.facts : [];
-        const factMap = new Map(facts.map(fact => [String(fact.id || ''), this._safePublicPhotoText(fact.text, 150)]));
+        const factMap = new Map(facts.map(fact => [String(fact.id || ''), {
+            text: this._safePublicPhotoText(fact.text, 170),
+            name: this._safePublicPhotoText(fact.name, 120),
+            kind: fact.kind === 'nearby' ? 'nearby' : 'fact',
+        }]));
+        const nearbyIds = new Set(facts.filter(fact => fact?.kind === 'nearby').map(fact => String(fact.id || '')));
         const placeLabel = this._safePublicPhotoText(publicContext.canonicalName, 100);
         const region = this._safePublicPhotoText(publicContext.region, 100);
         const cuePool = (Array.isArray(publicContext.photoCues) ? publicContext.photoCues : [])
             .map(cue => this._safePublicPhotoText(cue, 160))
             .filter(Boolean);
-        const fallbackFacts = facts.map(fact => this._safePublicPhotoText(fact.text, 150)).filter(Boolean);
-        const candidates = posts.filter(post => post?.source === 'place');
+        const fallbackFacts = facts.map(fact => this._safePublicPhotoText(fact.text, 170)).filter(Boolean);
+        const candidates = posts.filter(post => post?.source === 'place').sort((left, right) => {
+            const leftNamed = (left.factIds || []).some(id => nearbyIds.has(String(id))) ? 1 : 0;
+            const rightNamed = (right.factIds || []).some(id => nearbyIds.has(String(id))) ? 1 : 0;
+            return rightNamed - leftNamed;
+        });
         if (!candidates.length || (!cuePool.length && !fallbackFacts.length)) return;
         const target = Math.min(4, candidates.length, Math.max(2, Math.round(candidates.length * 0.45)));
         for (let index = 0; index < target; index++) {
             const post = candidates[index];
-            const linkedFact = (post.factIds || []).map(id => factMap.get(String(id))).find(Boolean);
-            const cue = cuePool[index % Math.max(1, cuePool.length)] || linkedFact || fallbackFacts[index % fallbackFacts.length];
-            const subject = [placeLabel, region].filter(Boolean).join(' in ') || 'a verified public place';
+            const linkedFact = (post.factIds || []).map(id => factMap.get(String(id))).find(fact => fact?.text);
+            const cue = cuePool[index % Math.max(1, cuePool.length)] || linkedFact?.text || fallbackFacts[index % fallbackFacts.length];
+            const areaLabel = [placeLabel, region].filter(Boolean).join(' in ') || 'a verified public place';
+            const subject = linkedFact?.kind === 'nearby' && linkedFact.name
+                ? `${linkedFact.name} near ${areaLabel}`
+                : areaLabel;
             post.imagePrompt = this._safeCommunityImagePrompt(
-                `documentary phone photo of ${subject}, ${linkedFact || cue}, authentic local atmosphere`,
+                `documentary phone photo of ${subject}, ${linkedFact?.text || cue}, authentic local atmosphere`,
                 { source: 'place' },
             );
             post.photoSource = post.imagePrompt ? 'grounded_public_v1' : '';
@@ -6306,6 +6400,10 @@ Respond with ONLY a JSON object, no markdown, no explanation:
             this._getCommunityPhotoBlob(url).then(blob => {
                 if (!image.isConnected) return;
                 if (!blob) {
+                    if (!this._communityPhotoFailureNotified) {
+                        this._communityPhotoFailureNotified = true;
+                        toastWarn('사진 생성 서비스 응답 없음 — 피드 글은 정상 표시돼요.');
+                    }
                     image.closest('.wt-community-photo-wrap')?.remove();
                     return;
                 }

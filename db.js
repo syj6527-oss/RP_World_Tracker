@@ -74,7 +74,7 @@ export class WorldTrackerDB {
         const movs = await this.getMovementsByChatId(chatId) || [];
         const dists = await this.getDistancesByChatId(chatId) || [];
         const cfg = await this.getMapConfig(chatId);
-        return redactSecretFields({ chatId, locations: locs, movements: movs, distances: dists, mapConfig: cfg, exportedAt: Date.now(), version: '0.9.60-beta' });
+        return redactSecretFields({ chatId, locations: locs, movements: movs, distances: dists, mapConfig: cfg, exportedAt: Date.now(), version: '0.9.61-beta' });
     }
 
     // 채팅별 복원
@@ -108,7 +108,7 @@ export class WorldTrackerDB {
         allData.movements = await this._r(tx.objectStore('movements').getAll()) || [];
         allData.distances = await this._r(tx.objectStore('distances').getAll()) || [];
         allData.mapConfigs = await this._r(tx.objectStore('mapConfig').getAll()) || [];
-        allData.exportedAt = Date.now(); allData.version = '0.9.60-beta';
+        allData.exportedAt = Date.now(); allData.version = '0.9.61-beta';
         return redactSecretFields(allData);
     }
 

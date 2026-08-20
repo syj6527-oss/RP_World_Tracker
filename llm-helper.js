@@ -1,5 +1,5 @@
 // 🐾 Paw Map — llm-helper.js (Connection Profile + Vertex AI Express)
-// v0.9.60: llmMode='profile'(ST 연결 프로필) | 'direct'(Vertex Express 키 + Google Search)
+// v0.9.61: llmMode='profile'(ST 연결 프로필) | 'direct'(Vertex Express 키 + Google Search)
 // 동의 시스템(externalAiEnabled/shareRpData)은 두 모드 모두에 적용됨
 
 import { getContext, extension_settings } from '../../../extensions.js';
