@@ -81,7 +81,7 @@ export class MapRenderer {
             const h = this.container.offsetHeight || this.container.clientHeight || 320;
             this.svg.setAttribute('height', Math.max(h, 320) + 'px');
         }
-        if (this.fantasyMode) { this._renderFantasy(); return; }
+        if (this.fantasyMode) { this._renderFantasyWorld(); return; }
 
         this.svg.innerHTML = `<defs>
             <filter id="wt-sh"><feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000" flood-opacity="0.08"/></filter>
@@ -640,6 +640,144 @@ export class MapRenderer {
     // ================================================================
     //  🏰 FANTASY (기존 유지)
     // ================================================================
+    _renderFantasyWorld() {
+        const { movements, currentLocationId } = this.lm;
+        const locations = this.lm.locations.filter(loc => !loc.parentId);
+        const curLoc = locations.find(loc => loc.id === currentLocationId) || locations[0];
+
+        for (const loc of locations) {
+            const saved = this._loadPinPos(loc.id);
+            if (saved) { loc.x = saved.x; loc.y = saved.y; loc._manualXY = true; }
+        }
+        if (locations.length >= 2) this._autoLayout(locations, curLoc);
+        if (curLoc && curLoc.x === 0 && curLoc.y === 0) {
+            curLoc.x = 300; curLoc.y = 280;
+            this.lm.updateLocation(curLoc.id, { x: curLoc.x, y: curLoc.y });
+        }
+
+        const cW = Math.max(this.container?.offsetWidth || 360, 300);
+        const cH = Math.max(this.container?.offsetHeight || 480, 300);
+        const vbW = 520;
+        const vbH = Math.round(vbW / (cW / cH));
+        if (this._fantasyLastCurId !== currentLocationId) {
+            this._fantasyLastCurId = currentLocationId;
+            this._vbManual = false;
+        }
+        if (!this._vbManual) {
+            const xs = locations.map(loc => loc.x);
+            const ys = locations.map(loc => loc.y);
+            const cx = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 300;
+            const cy = ys.length ? (Math.min(...ys) + Math.max(...ys)) / 2 : 280;
+            this.vb = { x: cx - vbW / 2, y: cy - vbH / 2, w: vbW, h: vbH };
+        } else {
+            this.vb.w = vbW;
+            this.vb.h = vbH;
+        }
+        this._applyVB();
+
+        const worldMode = String(this.lm.fantasyWorldMode || 'fantasy');
+        const chatId = this.lm.currentChatId || 'default';
+        const seed = this._hashStr(`${chatId}|${worldMode}|${currentLocationId || 'empty'}|${this._regenCounter || 0}`) || 1;
+        let svg = `<defs>
+            <filter id="wt-glow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+            <filter id="wt-fmap-shadow"><feDropShadow dx="0" dy="1" stdDeviation="1.3" flood-color="#4A321C" flood-opacity="0.18"/></filter>
+            <linearGradient id="wt-fmap-paper" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#F3E7C5"/><stop offset="0.5" stop-color="#E8D7AA"/><stop offset="1" stop-color="#DCC795"/></linearGradient>
+            <pattern id="wt-fmap-grain" width="37" height="37" patternUnits="userSpaceOnUse"><circle cx="5" cy="8" r="0.8" fill="#7E6135" opacity="0.12"/><circle cx="27" cy="19" r="0.6" fill="#7E6135" opacity="0.1"/><path d="M3 31 Q11 28 19 32" fill="none" stroke="#8F7248" stroke-width="0.5" opacity="0.09"/></pattern>
+        </defs>`;
+        svg += this._fantasyBackgroundSvg(this.vb, seed);
+
+        const drawn = new Set();
+        for (const move of movements) {
+            const from = locations.find(loc => loc.id === move.fromId);
+            const to = locations.find(loc => loc.id === move.toId);
+            if (!from || !to) continue;
+            const key = [move.fromId, move.toId].sort().join('-');
+            if (drawn.has(key)) continue;
+            drawn.add(key);
+            const bend = (this._hashStr(key) % 31) - 15;
+            svg += `<path d="M${from.x},${from.y} Q${(from.x + to.x) / 2 + bend},${(from.y + to.y) / 2 - bend} ${to.x},${to.y}" fill="none" stroke="#795736" stroke-width="2.4" stroke-dasharray="8 5" opacity="0.55" stroke-linecap="round"/>`;
+        }
+
+        for (const loc of locations) {
+            const current = loc.id === currentLocationId;
+            const type = loc.locationType || this._getLocType(loc.name);
+            if (current) svg += `<circle cx="${loc.x}" cy="${loc.y}" r="31" fill="#D99A22" opacity="0.18" filter="url(#wt-glow)"/>`;
+            svg += this._fantasyIcon(loc.x, loc.y, type, current, loc.visitCount || 0, loc.id);
+            svg += `<rect x="${loc.x - Math.max(28, loc.name.length * 4.1)}" y="${loc.y + 14}" width="${Math.max(56, loc.name.length * 8.2)}" height="20" rx="10" fill="#FFFDF7" stroke="#9B7B4A" stroke-width="0.7" opacity="0.94" filter="url(#wt-fmap-shadow)"/>`;
+            svg += `<text x="${loc.x}" y="${loc.y + 28}" text-anchor="middle" fill="#3E3022" font-size="${current ? 12.5 : 11}" font-weight="${current ? '750' : '650'}" font-family="-apple-system,'Noto Sans KR',sans-serif">${this._escapeSvgText(loc.name)}</text>`;
+            if (current) svg += `<text x="${loc.x}" y="${loc.y - 27}" text-anchor="middle" font-size="15">🐾</text>`;
+        }
+        if (!locations.length) {
+            svg += `<text x="${this.vb.x + this.vb.w / 2}" y="${this.vb.y + this.vb.h / 2}" text-anchor="middle" fill="#5D4037" font-size="14" font-family="-apple-system,'Noto Sans KR',sans-serif">장소를 추가해 지도를 만들어보세요 🏰</text>`;
+        }
+        svg += this._compassRose(this.vb.x + 34, this.vb.y + this.vb.h - 34);
+        this.svg.innerHTML = svg;
+    }
+
+    _fantasyBackgroundSvg(vb, seed) {
+        const rng = this._srand(seed * 7919);
+        const x = vb.x, y = vb.y, w = vb.w, h = vb.h;
+        const n = (min, max) => min + rng() * (max - min);
+        let out = `<g pointer-events="none"><rect x="${x - 30}" y="${y - 30}" width="${w + 60}" height="${h + 60}" fill="url(#wt-fmap-paper)"/><rect x="${x - 30}" y="${y - 30}" width="${w + 60}" height="${h + 60}" fill="url(#wt-fmap-grain)"/>`;
+
+        // 호수와 굽이치는 강
+        const lakeX = n(x + w * 0.16, x + w * 0.82);
+        const lakeY = n(y + h * 0.18, y + h * 0.82);
+        out += `<ellipse cx="${lakeX}" cy="${lakeY}" rx="${n(25, 48)}" ry="${n(14, 30)}" fill="#8FC5D2" opacity="0.72" stroke="#5D98A8" stroke-width="2"/>`;
+        const ry1 = n(y + h * 0.18, y + h * 0.78);
+        const ry2 = n(y + h * 0.18, y + h * 0.78);
+        const c1y = n(y, y + h);
+        const c2y = n(y, y + h);
+        const river = `M${x - 35},${ry1} C${x + w * 0.23},${c1y} ${x + w * 0.69},${c2y} ${x + w + 35},${ry2}`;
+        out += `<path d="${river}" fill="none" stroke="#5D98A8" stroke-width="24" opacity="0.68" stroke-linecap="round"/><path d="${river}" fill="none" stroke="#A9D7DF" stroke-width="16" opacity="0.8" stroke-linecap="round"/><path d="${river}" fill="none" stroke="#D8EEF0" stroke-width="2" opacity="0.75" stroke-dasharray="14 12"/>`;
+
+        // 흙길 네트워크
+        for (let i = 0; i < 7; i++) {
+            const sx = n(x - 20, x + w + 20), sy = n(y - 20, y + h + 20);
+            const ex = n(x - 20, x + w + 20), ey = n(y - 20, y + h + 20);
+            const mx = (sx + ex) / 2 + n(-75, 75), my = (sy + ey) / 2 + n(-65, 65);
+            const road = `M${sx},${sy} Q${mx},${my} ${ex},${ey}`;
+            out += `<path d="${road}" fill="none" stroke="#8F7144" stroke-width="6" opacity="0.28" stroke-linecap="round"/><path d="${road}" fill="none" stroke="#F2D99D" stroke-width="3.2" opacity="0.92" stroke-linecap="round"/>`;
+        }
+
+        // 숲 군락
+        for (let cluster = 0; cluster < 6; cluster++) {
+            const cx = n(x + 30, x + w - 30), cy = n(y + 35, y + h - 35);
+            const count = 5 + Math.floor(rng() * 8);
+            for (let i = 0; i < count; i++) {
+                const tx = cx + n(-30, 30), ty = cy + n(-24, 24), s = n(4.5, 8.5);
+                out += `<path d="M${tx},${ty - s} L${tx - s * 0.7},${ty + s * 0.55} L${tx + s * 0.7},${ty + s * 0.55} Z" fill="${rng() > 0.45 ? '#668556' : '#789560'}" stroke="#4F6D43" stroke-width="0.6" opacity="0.82"/><line x1="${tx}" y1="${ty + s * 0.45}" x2="${tx}" y2="${ty + s}" stroke="#6E4F33" stroke-width="1"/>`;
+            }
+        }
+
+        // 산맥
+        for (let cluster = 0; cluster < 3; cluster++) {
+            const mx = n(x + 35, x + w - 90), my = n(y + 45, y + h - 55);
+            const count = 3 + Math.floor(rng() * 4);
+            for (let i = 0; i < count; i++) {
+                const px = mx + i * n(13, 22), baseY = my + n(-7, 7), mw = n(15, 27), mh = n(22, 42);
+                out += `<path d="M${px},${baseY} L${px + mw / 2},${baseY - mh} L${px + mw},${baseY} Z" fill="#9B907C" stroke="#746A5A" stroke-width="1" opacity="0.75"/><path d="M${px + mw * 0.32},${baseY - mh * 0.63} L${px + mw / 2},${baseY - mh} L${px + mw * 0.67},${baseY - mh * 0.62} L${px + mw * 0.53},${baseY - mh * 0.7} Z" fill="#EEE6D5" opacity="0.8"/>`;
+            }
+        }
+
+        // 장식용 작은 마을(클릭 불가)
+        for (let village = 0; village < 5; village++) {
+            const vx = n(x + 35, x + w - 60), vy = n(y + 35, y + h - 45);
+            const houses = 2 + Math.floor(rng() * 4);
+            for (let i = 0; i < houses; i++) {
+                const hx = vx + n(-20, 25), hy = vy + n(-14, 18), hw = n(8, 13), hh = n(6, 10);
+                out += `<rect x="${hx}" y="${hy}" width="${hw}" height="${hh}" rx="1" fill="#D8B47A" stroke="#7D5C37" stroke-width="0.7"/><path d="M${hx - 1},${hy} L${hx + hw / 2},${hy - hh * 0.7} L${hx + hw + 1},${hy} Z" fill="#A85F45" stroke="#74402F" stroke-width="0.7"/>`;
+            }
+        }
+
+        out += `<rect x="${x + 8}" y="${y + 8}" width="${w - 16}" height="${h - 16}" rx="14" fill="none" stroke="#8B6914" stroke-width="1.2" stroke-dasharray="3 5" opacity="0.36"/></g>`;
+        return out;
+    }
+
+    _escapeSvgText(value) {
+        return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+    }
+
     _renderFantasy() { const{locations,movements,currentLocationId}=this.lm;if(locations.length>=2)this._autoLayout(locations,locations.find(l=>l.id===currentLocationId)||locations[0]);const cW=Math.max(this.container?.offsetWidth||600,300),cH=Math.max(this.container?.offsetHeight||400,300),aspect=cW/cH;if(locations.length){const pad=100,xs=locations.map(l=>l.x),ys=locations.map(l=>l.y),minX=Math.min(...xs)-pad,maxX=Math.max(...xs)+pad,minY=Math.min(...ys)-pad,maxY=Math.max(...ys)+pad,w=Math.max(400,maxX-minX),h=Math.max(300,maxY-minY,w/aspect);this.vb={x:minX,y:minY,w,h};}else{this.vb={x:0,y:0,w:600,h:Math.max(400,Math.round(600/aspect))};}this._applyVB();const vb=this.vb;let svg=`<defs><filter id="wt-glow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>`;const drawn=new Set();for(const m of movements){const f=locations.find(l=>l.id===m.fromId),t=locations.find(l=>l.id===m.toId);if(!f||!t)continue;const k=[m.fromId,m.toId].sort().join('-');if(drawn.has(k))continue;drawn.add(k);svg+=`<path d="M${f.x},${f.y} Q${(f.x+t.x)/2+((k.charCodeAt(0)%16)-8)},${(f.y+t.y)/2+((k.charCodeAt(1%k.length)%16)-8)} ${t.x},${t.y}" fill="none" stroke="#6B3A2A" stroke-width="2" stroke-dasharray="8 5" opacity="0.35" stroke-linecap="round"/>`;}for(const loc of locations){const cur=loc.id===currentLocationId,type=loc.locationType||this._getLocType(loc.name);if(cur)svg+=`<circle cx="${loc.x}" cy="${loc.y}" r="28" fill="#CD853F" opacity="0.15" filter="url(#wt-glow)"/>`;svg+=this._fantasyIcon(loc.x,loc.y,type,cur,loc.visitCount||0,loc.id);svg+=`<text x="${loc.x}" y="${loc.y+24}" text-anchor="middle" fill="#3E2723" font-size="${cur?13:11}" font-weight="${cur?'700':'600'}" font-family="'Georgia',serif">${loc.name}</text>`;if(cur)svg+=`<text x="${loc.x}" y="${loc.y-24}" text-anchor="middle" font-size="14">🐾</text>`;}if(!locations.length)svg+=`<text x="${vb.x+vb.w/2}" y="${vb.y+vb.h/2}" text-anchor="middle" fill="#5D4037" font-size="14" font-family="serif" font-style="italic">장소를 추가해 지도를 만들어보세요... 🏰</text>`;svg+=this._compassRose(vb.x+32,vb.y+vb.h-32);this.svg.innerHTML=svg;}
     _getLocType(n){const l=n.toLowerCase();if(/성|castle|palace|궁|요새|tower|탑/.test(l))return'castle';if(/산|mountain|peak|봉/.test(l))return'mountain';if(/숲|forest|woods|jungle/.test(l))return'forest';if(/신전|temple|church|성당|교회/.test(l))return'temple';if(/마을|village|town/.test(l))return'village';if(/집|home|house|오두막/.test(l))return'house';if(/가게|shop|market|시장/.test(l))return'shop';if(/술집|tavern|bar|pub|inn|주막/.test(l))return'tavern';if(/동굴|cave|dungeon|지하/.test(l))return'cave';if(/항구|port|harbor|부두/.test(l))return'port';if(/강|river|lake|호수|바다|sea/.test(l))return'water';if(/학교|school|도서관|library/.test(l))return'library';if(/arena|훈련|체육|gym/.test(l))return'arena';return'flag';}
     _fantasyIcon(x,y,type,cur,v,id){const s=cur?1.15:1,em={castle:'🏰',mountain:'⛰️',forest:'🌲',temple:'⛪',village:'🏘️',house:'🏠',shop:'🏪',tavern:'🍺',cave:'🕳️',port:'⚓',water:'💧',library:'📚',arena:'⚔️',flag:'🪧'},e=em[type]||'📍',sz=cur?28:22;let svg=`<g transform="translate(${x},${y}) scale(${s})" class="wt-location-node" data-id="${id}">`;if(cur)svg+=`<circle r="20" fill="#CD853F" opacity="0.2" filter="url(#wt-glow)"/>`;svg+=`<text y="6" text-anchor="middle" font-size="${sz}" style="cursor:pointer;pointer-events:none;user-select:none">${e}</text>`;if(v>0)svg+=`<circle cx="14" cy="-8" r="7" fill="#DAA520" stroke="#5D4037" stroke-width="0.8"/><text x="14" y="-5" text-anchor="middle" fill="#3E2723" font-size="8" font-weight="700">${v}</text>`;svg+='</g>';return svg;}

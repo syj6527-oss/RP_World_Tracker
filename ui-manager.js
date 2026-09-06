@@ -38,6 +38,8 @@ export class UIManager {
         this.pi=pi;
         this.mapRenderer=null;
         this.leafletRenderer=null;
+        this._isLeafletFull=false;
+        this._isFantasyFull=false;
         this.panelVisible=false;
         this._reviewCache = new Map();
         this._reviewPending = new Set();
@@ -360,7 +362,7 @@ export class UIManager {
     createSettingsPanel() {
         const html = `<div id="wt-settings" class="wt-settings"><div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.10.0-beta</span></b>
+                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.10.1-beta</span></b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div><div class="inline-drawer-content">
                 <div style="font-size:12px;font-weight:800;margin:2px 0 7px">기본 설정</div>
@@ -847,9 +849,9 @@ export class UIManager {
                             <span id="wt-rp-route-summary" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
                             <button id="wt-rp-route-clear" type="button" aria-label="RP 경로 닫기" style="border:0;background:transparent;color:#8A6248;font-size:15px;cursor:pointer;padding:3px 5px">✕</button>
                         </div>
-                        <!-- 구글맵 스타일 바텀시트 -->
-                        <div id="wt-bottomsheet" class="wt-bs" style="display:none"></div>
                     </div>
+                    <!-- 실제 지도와 판타지 지도가 함께 쓰는 장소 상세 바텀시트 -->
+                    <div id="wt-bottomsheet" class="wt-bs" style="display:none"></div>
                 </div>
 
                 <!-- 팝오버 (인라인!) -->
@@ -985,7 +987,7 @@ export class UIManager {
                 <div class="wt-section-toggle" id="wt-move-toggle">🚶 이동 히스토리 <span id="wt-move-arrow">▾</span></div>
                 <div id="wt-move-wrap" style="display:none"><div id="wt-move-list" class="wt-move-list"></div></div>
             </div>
-            <!-- 🐾 PAW MAP 하단 탭 (Leaflet 모드에서만 보임) -->
+            <!-- 🐾 PAW MAP 하단 탭 (실제 지도/판타지 지도 공용) -->
             <div id="wt-paw-nav" style="display:none;border-top:1px solid #E0E0E0;background:#fff;flex-shrink:0;z-index:40">
                 <div style="display:flex">
                     <div class="wt-paw-tab wt-paw-tab-on" data-tab="explore" role="button" tabindex="0" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:10px 4px 12px;min-height:68px;cursor:pointer;background:#fff">
@@ -1136,7 +1138,8 @@ export class UIManager {
                 this.mapRenderer._vbManual = false;
                 if (this.mapRenderer.invalidateCity) this.mapRenderer.invalidateCity();
                 this.mapRenderer.render();
-                toastSuccess('🗺️ 약도 재생성!');
+                const fantasy = extension_settings[EXTENSION_NAME]?.fantasyTheme === true;
+                toastSuccess(fantasy ? '🏰 가상 지도 재생성!' : '🗺️ 약도 재생성!');
             }
         }); // 기본: 장소 검색
         $('#wt-search-tab-loc').on('click', () => {
@@ -1525,10 +1528,11 @@ ${trimmed.substring(0, 1500)}`;
             // 판타지 테마 상태 복원
             const s = extension_settings[EXTENSION_NAME];
             if (s?.fantasyTheme) {
-                $('#wt-panel').addClass('wt-panel-fantasy');
+                // 판타지에서도 일반 모드의 UI 색상과 구조를 그대로 사용한다.
+                $('#wt-panel').removeClass('wt-panel-fantasy');
                 $('#wt-fantasy-btn').css({ background: '#DAA520', borderRadius: '6px' });
-                $('.wt-panel-title span:first').text('🐺');
-                $('.wt-scene-icon').text('🍖');
+                $('.wt-panel-title span:first').text('🐶');
+                $('.wt-scene-icon').text('🦴');
                 // Task 3: 모드 바 복원
                 $('#wt-mode-node, #wt-mode-leaflet').hide();
                 $('#wt-mode-fantasy').show().text('🏰 지도').addClass('wt-mode-active');
@@ -1562,8 +1566,8 @@ ${trimmed.substring(0, 1500)}`;
         saveSettingsDebounced();
 
         // 마스코트 아이콘 전환
-        const mascot = isFantasy ? '🐺' : '🐶';
-        const treat = isFantasy ? '🍖' : '🦴';
+        const mascot = '🐶';
+        const treat = '🦴';
         $('.wt-panel-title span:first').text(mascot);
         $('.wt-scene-icon').text(treat);
 
@@ -1580,11 +1584,12 @@ ${trimmed.substring(0, 1500)}`;
         }
 
         if (isFantasy) {
-            $('#wt-panel').addClass('wt-panel-fantasy');
+            // 지도만 판타지로 바꾸고 패널 UI는 일반 모드와 동일하게 유지한다.
+            $('#wt-panel').removeClass('wt-panel-fantasy');
             $('#wt-fantasy-btn').css({ background: '#DAA520', borderRadius: '6px' });
             if (s.mapMode !== 'fantasy') s._prevMapMode = s.mapMode || 'leaflet';
             this._setMapMode('fantasy');
-            wtNotify(`🐺 ${treat} 판타지 모드!`, 'move', 2000);
+            wtNotify('🏰 판타지 모드!', 'move', 2000);
             if (!String(this.lm.fantasyWorldMode || '').trim()) {
                 setTimeout(() => $('#wt-fantasy-context-input').trigger('focus'), 250);
                 wtNotify('📜 세계관 모드를 입력하면 소식망이 그 시대에 맞게 바뀌어요.', 'info', 3200);
@@ -1593,7 +1598,7 @@ ${trimmed.substring(0, 1500)}`;
             $('#wt-panel').removeClass('wt-panel-fantasy');
             $('#wt-fantasy-btn').css({ background: 'none', borderRadius: '' });
             this._setMapMode(s._prevMapMode || 'leaflet');
-            wtNotify(`🐶 ${treat} 일반 모드`, 'info', 1500);
+            wtNotify('🐶 일반 모드', 'info', 1500);
         }
 
         // Bug J: 이미 열린 팝오버의 아이콘 선택 show/hide
@@ -1602,7 +1607,7 @@ ${trimmed.substring(0, 1500)}`;
         } else {
             $('#wt-pop-icon-type').closest('div').hide();
         }
-        $('#wt-pop-community').toggle(isFantasy);
+        $('#wt-pop-community').hide();
         $('#wt-pop-geo-section').toggle(!isFantasy);
     }
 
@@ -1622,8 +1627,9 @@ ${trimmed.substring(0, 1500)}`;
         $('#wt-rp-route-banner').hide();
         $('#wt-rp-route-summary').text('');
         this._isLeafletFull = false;
+        this._isFantasyFull = false;
         this._isGeneratingReview = false;
-        $('#wt-panel-body').removeClass('wt-leaflet-full');
+        $('#wt-panel-body').removeClass('wt-leaflet-full wt-fantasy-full');
         $('#wt-paw-nav').hide();
         // ★ 숨겨진 요소 전부 복원
         $('#wt-loc-toggle,#wt-move-toggle,#wt-add-toggle,.wt-scene-loc,#wt-map-toggle,#wt-btn-refresh').show();
@@ -1654,6 +1660,13 @@ ${trimmed.substring(0, 1500)}`;
             }
             if (this.mapRenderer) {
                 this.mapRenderer.fantasyMode = (mode === 'fantasy');
+                if (mode === 'fantasy') {
+                    this.mapRenderer.onLocationClick = id => this._openFantasyLocation(id);
+                    this.mapRenderer.onPopupCardClick = id => this._openFantasyLocation(id);
+                } else {
+                    this.mapRenderer.onLocationClick = id => this._yakdoRecenter(id);
+                    this.mapRenderer.onPopupCardClick = id => this.showPop(id);
+                }
                 this.mapRenderer.render();
             }
         }
@@ -1668,7 +1681,7 @@ ${trimmed.substring(0, 1500)}`;
         const subLoc = this.lm.currentSubLocationId ? this.lm.locations.find(l => l.id === this.lm.currentSubLocationId) : null;
         $('#wt-scene-name').text(cur ? (cur.name + (subLoc ? ' > ' + subLoc.name : '')) : '—').css('color', cur?.color || '');
         // ★ Leaflet 풀스크린이면 장소목록/이동히스토리 숨김 유지
-        if (this._isLeafletFull) {
+        if (this._isLeafletFull || this._isFantasyFull) {
             $('#wt-loc-toggle,#wt-loc-wrap,#wt-move-toggle,#wt-move-wrap,#wt-add-toggle,#wt-add-form,.wt-scene-loc,#wt-popover').hide();
             $('.wt-map-mode-bar').hide(); // 탭만 숨김 (헤더는 유지 → 닫기 ✕ 접근)
             $('.wt-panel-header').show();
@@ -1690,10 +1703,11 @@ ${trimmed.substring(0, 1500)}`;
         $('.wt-mode-btn').removeClass('wt-mode-active');
         $(`#wt-mode-${mode}`).addClass('wt-mode-active');
 
-        // ★ Leaflet 풀스크린 해제 (다른 모드로 전환 시)
-        if (mode !== 'leaflet') {
+        // ★ 풀스크린 지도 해제 (일반 약도로 전환할 때)
+        if (mode !== 'leaflet' && mode !== 'fantasy') {
             this._isLeafletFull = false;
-            $('#wt-panel-body').removeClass('wt-leaflet-full');
+            this._isFantasyFull = false;
+            $('#wt-panel-body').removeClass('wt-leaflet-full wt-fantasy-full');
             $('#wt-loc-toggle,#wt-move-toggle,#wt-add-toggle,.wt-scene-loc').show();
             $('#wt-map-toggle').show();
             $('#wt-btn-refresh').show();
@@ -1711,6 +1725,10 @@ ${trimmed.substring(0, 1500)}`;
         }
 
         if (mode === 'node') {
+            $('#wt-btn-refresh').attr('title', '약도 재배치');
+            this._isLeafletFull = false;
+            this._isFantasyFull = false;
+            $('#wt-panel-body').removeClass('wt-leaflet-full wt-fantasy-full');
             $('#wt-leaflet-wrap').hide();
             $('#wt-map-wrap').show();
             // Bug B: 판타지 플래그 먼저 해제 (render 전에!)
@@ -1728,6 +1746,9 @@ ${trimmed.substring(0, 1500)}`;
             }
             this.mapRenderer.render();
         } else if (mode === 'leaflet') {
+            if (this._isFantasyFull) this._hideBottomSheet();
+            this._isFantasyFull = false;
+            $('#wt-panel-body').removeClass('wt-fantasy-full');
             $('#wt-map-wrap').hide();
             $('#wt-leaflet-wrap').show();
             // ★ 구글맵 스타일: 풀스크린
@@ -1817,9 +1838,22 @@ ${trimmed.substring(0, 1500)}`;
                 setTimeout(() => this.leafletRenderer?.invalidateSize(), ms);
             });
         } else if (mode === 'fantasy') {
-            // 🏰 판타지 모드: 노드 맵 + 판타지 테마
+            // 🏰 판타지 모드: 일반 PAW MAP과 같은 풀스크린 UI + 로컬 생성 지도
+            this._hideBottomSheet();
+            this._isLeafletFull = false;
+            this._isFantasyFull = true;
+            $('#wt-panel-body').removeClass('wt-leaflet-full').addClass('wt-fantasy-full');
             $('#wt-leaflet-wrap').hide();
             $('#wt-map-wrap').show();
+            $('#wt-loc-toggle,#wt-loc-wrap,#wt-move-toggle,#wt-move-wrap,#wt-add-toggle,#wt-add-form,.wt-scene-loc,#wt-popover').hide();
+            $('.wt-map-mode-bar').hide();
+            $('.wt-panel-header').show();
+            $('#wt-float-close').hide();
+            $('#wt-map-section').show();
+            $('#wt-map-toggle').hide();
+            $('#wt-btn-refresh').show();
+            $('#wt-btn-refresh').attr('title', '가상 지도 재생성');
+            $('#wt-paw-nav').show();
             const container = document.querySelector('#wt-map-container');
             if (container) {
                 container.classList.add('wt-fantasy-theme');
@@ -1828,8 +1862,8 @@ ${trimmed.substring(0, 1500)}`;
             if (!this.mapRenderer) {
                 if (container) {
                     this.mapRenderer = new MapRenderer(container, this.lm);
-                    this.mapRenderer.onLocationClick = id => this._yakdoRecenter(id);
-                this.mapRenderer.onPopupCardClick = id => { this.showPop(id); };
+                    this.mapRenderer.onLocationClick = id => this._openFantasyLocation(id);
+                    this.mapRenderer.onPopupCardClick = id => this._openFantasyLocation(id);
                     this.mapRenderer.onMoveRequest = (id, name) => {
                         wtNotify(`📍 "${name}" 이동 모드 — 맵을 터치하세요`, 'info', 3000);
                     };
@@ -1837,6 +1871,8 @@ ${trimmed.substring(0, 1500)}`;
             }
             if (this.mapRenderer) {
                 this.mapRenderer.fantasyMode = true;
+                this.mapRenderer.onLocationClick = id => this._openFantasyLocation(id);
+                this.mapRenderer.onPopupCardClick = id => this._openFantasyLocation(id);
                 this.mapRenderer._layoutDirty = true;
                 this.mapRenderer.render();
             }
@@ -1865,6 +1901,13 @@ ${trimmed.substring(0, 1500)}`;
     }
 
     // ========== 약도: 장소 클릭 → 해당 핀 중심으로 배경 재생성 ==========
+    _openFantasyLocation(locId) {
+        if (this._lastFantasyOpenId === locId && Date.now() - (window._wtMapPinOpenAt || 0) < 450) return;
+        this._lastFantasyOpenId = locId;
+        window._wtMapPinOpenAt = Date.now();
+        this._showBottomSheet(locId);
+    }
+
     async _yakdoRecenter(locId) {
         const loc = this.lm.locations.find(l => l.id === locId);
         if (!loc) return;
@@ -1968,7 +2011,8 @@ ${trimmed.substring(0, 1500)}`;
         // Bug D: 아이콘 선택은 판타지 모드에서만 표시
         const s2 = extension_settings[EXTENSION_NAME];
         if (s2?.fantasyTheme) { $('#wt-pop-icon-type').closest('div').show(); } else { $('#wt-pop-icon-type').closest('div').hide(); }
-        $('#wt-pop-community').toggle(s2?.fantasyTheme === true).text(s2?.fantasyTheme ? '📜 세계관 소식 보기' : '💬 커뮤니티 보기');
+        // 커뮤니티는 일반/판타지 모두 공용 장소 바텀시트에서 연다.
+        $('#wt-pop-community').hide();
         $('#wt-pop-geo-section').toggle(s2?.fantasyTheme !== true);
         // Task 6: 좌표 없으면 안내 표시
         if (!l.lat && !l.lng) { $('#wt-pop-geo-notice').show(); } else { $('#wt-pop-geo-notice').hide(); }
@@ -2503,12 +2547,18 @@ ${trimmed.substring(0, 1500)}`;
         if (!loc) return;
         const bs = $('#wt-bottomsheet');
         bs.attr('data-id', locId);
+        const isFantasy = extension_settings[EXTENSION_NAME]?.fantasyTheme === true;
+        const fantasyWorldMode = this._plainText(this.lm.fantasyWorldMode || '판타지 세계', 120) || '판타지 세계';
         // #2/#3: 장소(현재 위치 포함) 클릭 시 지도도 그 위치로 이동
         if (this._isLeafletFull && this.leafletRenderer?.map && loc.lat != null && loc.lng != null) {
             try { this.leafletRenderer.map.flyTo([loc.lat, loc.lng], 16, { duration: 0.5 }); } catch (_) {}
         }
 
-        const style = this.leafletRenderer?._locStyle?.(loc.name) || { emoji: '📍' };
+        const fantasyType = loc.locationType || this.mapRenderer?._getLocType?.(loc.name) || 'flag';
+        const fantasyEmojis = { castle:'🏰', mountain:'⛰️', forest:'🌲', temple:'⛩️', village:'🏘️', house:'🏠', shop:'🏪', tavern:'🍺', cave:'🕳️', port:'⚓', water:'💧', library:'📚', arena:'⚔️', flag:'📍' };
+        const style = isFantasy
+            ? { emoji: fantasyEmojis[fantasyType] || '📍' }
+            : (this.leafletRenderer?._locStyle?.(loc.name) || { emoji: '📍' });
         const v = loc.visitCount || 0;
         const cur = loc.id === this.lm.currentLocationId;
         const visitLabel = v === 0 ? '새 장소' : `방문 ${v}회`;
@@ -2590,11 +2640,14 @@ ${trimmed.substring(0, 1500)}`;
         }
 
         const showGoogleLinks = extension_settings[EXTENSION_NAME]?.showGoogleLinks === true;
+        const communityAccent = isFantasy ? '#A77812' : '#1D9BF0';
+        const communityLabel = isFantasy ? `${this._escapeHtml(fantasyWorldMode)} 소식` : '실시간 반응';
+        const communityAction = isFantasy ? '새 소식' : '새 반응';
         // v0.9.51: Yun 정책 — Google 지도/길찾기 버튼만 옵션, Street View는 항상 표시
-        const googlePillsHtml = (showGoogleLinks ? `
+        const googlePillsHtml = isFantasy ? '' : ((showGoogleLinks ? `
                 <button class="wt-bs-pill-btn" data-action="google-view" style="display:flex;align-items:center;gap:3px;padding:6px 12px;border-radius:18px;border:1.5px solid #4285F4;background:#EEF4FF;font-size:10.5px;font-weight:600;color:#2859A8;white-space:nowrap;cursor:pointer;font-family:inherit">🗺️ Google</button>
                 <button class="wt-bs-pill-btn" data-action="google-directions" style="display:flex;align-items:center;gap:3px;padding:6px 12px;border-radius:18px;border:1.5px solid #4285F4;background:#EEF4FF;font-size:10.5px;font-weight:600;color:#2859A8;white-space:nowrap;cursor:pointer;font-family:inherit">🚶 Google 길찾기</button>` : '') + `
-                <button class="wt-bs-pill-btn" data-action="google-streetview" style="display:flex;align-items:center;gap:3px;padding:6px 12px;border-radius:18px;border:1.5px solid #4285F4;background:#EEF4FF;font-size:10.5px;font-weight:600;color:#2859A8;white-space:nowrap;cursor:pointer;font-family:inherit">👁️ Street View</button>`;
+                <button class="wt-bs-pill-btn" data-action="google-streetview" style="display:flex;align-items:center;gap:3px;padding:6px 12px;border-radius:18px;border:1.5px solid #4285F4;background:#EEF4FF;font-size:10.5px;font-weight:600;color:#2859A8;white-space:nowrap;cursor:pointer;font-family:inherit">👁️ Street View</button>`);
 
         const html = `
             <div class="wt-bs-handle" style="display:flex;justify-content:center;padding:14px 0 8px;cursor:pointer;min-height:44px"><div style="width:36px;height:4px;background:#D4D0C8;border-radius:2px"></div></div>
@@ -2602,7 +2655,7 @@ ${trimmed.substring(0, 1500)}`;
                 <span style="font-size:24px;flex-shrink:0;margin-top:2px">${style.emoji}</span>
                 <div style="flex:1;min-width:0">
                     <div style="font-size:17px;font-weight:800;color:#202124;line-height:1.25">${loc.name}</div>
-                    <div style="font-size:11px;color:#70757A;margin-top:2px">${visitLabel}${cur ? ' · 현재 위치 🐾' : ''}${walkNear.length ? ' · Near ' + walkNear[0].name : ''}</div>
+                    <div style="font-size:11px;color:#70757A;margin-top:2px">${isFantasy ? `${this._escapeHtml(fantasyWorldMode)} · ` : ''}${visitLabel}${cur ? ' · 현재 위치 🐾' : ''}${walkNear.length ? ' · Near ' + walkNear[0].name : ''}</div>
                 </div>
                 <button id="wt-bs-x" style="width:28px;height:28px;border:none;background:rgba(0,0,0,.04);border-radius:50%;font-size:12px;color:#70757A;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0">✕</button>
             </div>
@@ -2623,7 +2676,7 @@ ${trimmed.substring(0, 1500)}`;
                 <div class="wt-bs-tab" data-tab="review" style="flex:1;text-align:center;padding:8px;font-size:11px;font-weight:600;color:#B0A898;cursor:pointer;border-bottom:2.5px solid transparent;margin-bottom:-2px">리뷰</div>
                 <div class="wt-bs-tab" data-tab="rooms" style="flex:1;text-align:center;padding:8px;font-size:11px;font-weight:600;color:#B0A898;cursor:pointer;border-bottom:2.5px solid transparent;margin-bottom:-2px">내부</div>
                 <div class="wt-bs-tab" data-tab="nodemap" style="flex:1;text-align:center;padding:8px;font-size:11px;font-weight:600;color:#B0A898;cursor:pointer;border-bottom:2.5px solid transparent;margin-bottom:-2px">약도</div>
-                <div class="wt-bs-tab" data-tab="community" style="flex:1;text-align:center;padding:8px;font-size:11px;font-weight:600;color:#B0A898;cursor:pointer;border-bottom:2.5px solid transparent;margin-bottom:-2px;white-space:nowrap">🟢 실시간</div>
+                <div class="wt-bs-tab" data-tab="community" style="flex:1;text-align:center;padding:8px;font-size:11px;font-weight:600;color:#B0A898;cursor:pointer;border-bottom:2.5px solid transparent;margin-bottom:-2px;white-space:nowrap">커뮤니티</div>
             </div>
             <div id="wt-bs-tab-overview" style="padding:10px 14px;overflow-y:auto">
                 <!-- 분위기 카드 / 사진 갤러리 -->
@@ -2751,19 +2804,19 @@ ${trimmed.substring(0, 1500)}`;
                 <div id="wt-bs-comm-sticky" style="position:sticky;top:0;z-index:5;background:#fff;display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #EFF3F4">
                     <div style="font-size:12px;color:#536471;display:flex;align-items:center;gap:6px">
                         <span style="width:7px;height:7px;background:#00BA7C;border-radius:50%;display:inline-block;animation:wtLivePulse 2s infinite"></span>
-                        실시간 반응 <b id="wt-bs-comm-count" style="color:#0F1419;font-weight:700">${(loc.community || []).length}</b>개
+                        ${communityLabel} <b id="wt-bs-comm-count" style="color:#0F1419;font-weight:700">${(loc.community || []).length}</b>개
                     </div>
                     <div style="display:flex;gap:6px">
-                        <button class="wt-bs-comm-fs" style="padding:6px 10px;background:#F7F9F9;border:1px solid #EFF3F4;border-radius:18px;font-size:11px;color:#536471;cursor:pointer;font-family:inherit;touch-action:manipulation;-webkit-tap-highlight-color:rgba(0,0,0,.1);min-height:32px" title="전체화면">⛶</button>
-                        <button class="wt-bs-comm-gen-inline" style="padding:6px 14px;background:#1D9BF0;color:#fff;border:none;border-radius:18px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;box-shadow:0 1px 3px rgba(29,155,240,.3);touch-action:manipulation;-webkit-tap-highlight-color:rgba(29,155,240,.4);min-height:32px;display:flex;align-items:center;gap:4px">✨ <span>새 반응</span></button>
+                        ${isFantasy ? '' : '<button class="wt-bs-comm-fs" style="padding:6px 10px;background:#F7F9F9;border:1px solid #EFF3F4;border-radius:18px;font-size:11px;color:#536471;cursor:pointer;font-family:inherit;touch-action:manipulation;-webkit-tap-highlight-color:rgba(0,0,0,.1);min-height:32px" title="전체화면">⛶</button>'}
+                        <button class="wt-bs-comm-gen-inline" style="padding:6px 14px;background:${communityAccent};color:#fff;border:none;border-radius:18px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;box-shadow:0 1px 3px rgba(90,65,10,.25);touch-action:manipulation;-webkit-tap-highlight-color:rgba(167,120,18,.25);min-height:32px;display:flex;align-items:center;gap:4px">✨ <span>${communityAction}</span></button>
                     </div>
                 </div>
                 <!-- 피드 본문 -->
                 <div id="wt-bs-comm-feed" style="background:#fff">
-                    ${(loc.community && loc.community.length) ? loc.community.map(p => this._renderCommunityPostCard(p, loc.id)).join('') : `<div style="padding:60px 20px;text-align:center;color:#8B98A5;font-size:13px"><div style="font-size:40px;margin-bottom:12px">💭</div><div style="font-size:13px;color:#536471;font-weight:500;margin-bottom:4px">아직 반응이 없어요</div><div style="font-size:11px;color:#8B98A5">✨ 버튼을 눌러 실시간 반응을 생성해보세요</div></div>`}
+                    ${(loc.community && loc.community.length) ? loc.community.map(p => this._renderCommunityPostCard(p, loc.id)).join('') : `<div style="padding:60px 20px;text-align:center;color:#8B98A5;font-size:13px"><div style="font-size:40px;margin-bottom:12px">💭</div><div style="font-size:13px;color:#536471;font-weight:500;margin-bottom:4px">아직 ${isFantasy ? '소식이' : '반응이'} 없어요</div><div style="font-size:11px;color:#8B98A5">✨ 버튼을 눌러 ${isFantasy ? '세계관 소식을' : '실시간 반응을'} 생성해보세요</div></div>`}
                 </div>
                 <!-- FAB (우하단) -->
-                <button class="wt-bs-comm-fab" style="position:sticky;bottom:16px;margin-left:auto;margin-right:16px;margin-top:-60px;margin-bottom:16px;display:block;width:48px;height:48px;border-radius:50%;background:#1D9BF0;color:#fff;border:none;font-size:22px;cursor:pointer;box-shadow:0 4px 14px rgba(29,155,240,.4);font-family:inherit;touch-action:manipulation;-webkit-tap-highlight-color:rgba(29,155,240,.4);z-index:4">✨</button>
+                <button class="wt-bs-comm-fab" aria-label="${communityAction} 생성" style="position:sticky;bottom:16px;margin-left:auto;margin-right:16px;margin-top:-60px;margin-bottom:16px;display:block;width:48px;height:48px;border-radius:50%;background:${communityAccent};color:#fff;border:none;font-size:22px;cursor:pointer;box-shadow:0 4px 14px rgba(90,65,10,.3);font-family:inherit;touch-action:manipulation;-webkit-tap-highlight-color:rgba(167,120,18,.25);z-index:4">✨</button>
             </div>`;
 
         bs.html(html).show().css({ background: '#fff' });
@@ -3070,28 +3123,30 @@ ${trimmed.substring(0, 1500)}`;
             const lid = curBs?.getAttribute('data-id');
             if (lid) self._showNodemapFullscreen(lid);
         });
-        // 💬 커뮤니티 버튼 핸들러 (debounce로 중복 호출 방지)
+        // 💬 모바일의 pointerup → click 이중 발화를 막는 문서 위임 핸들러
         let _commHandlerLock = false;
-        const commGenHandler = async (e) => {
+        let _commActivatedAt = 0;
+        $(document).off('pointerup.wtCommGen click.wtCommGen', '#wt-bottomsheet .wt-bs-comm-gen, #wt-bottomsheet .wt-bs-comm-gen-inline, #wt-bottomsheet .wt-bs-comm-fab');
+        $(document).on('pointerup.wtCommGen click.wtCommGen', '#wt-bottomsheet .wt-bs-comm-gen, #wt-bottomsheet .wt-bs-comm-gen-inline, #wt-bottomsheet .wt-bs-comm-fab', async function(e) {
             e.preventDefault();
             e.stopPropagation();
+            const now = Date.now();
+            if (now - _commActivatedAt < 450) return;
+            _commActivatedAt = now;
             if (_commHandlerLock) return;
             _commHandlerLock = true;
-            setTimeout(() => _commHandlerLock = false, 500);
-            const btn = $(e.currentTarget);
-            if (btn.prop('disabled')) return;
+            const btn = $(this);
+            if (btn.prop('disabled')) { _commHandlerLock = false; return; }
             const originalHtml = btn.html();
             btn.prop('disabled', true).text('⏳ 생성 중...');
             try {
-                await self._requestCommunityGeneration(locId);
+                const lid = String($('#wt-bottomsheet').attr('data-id') || locId || '');
+                if (lid) await self._requestCommunityGeneration(lid);
             } finally {
+                _commHandlerLock = false;
                 if (document.contains(btn[0])) btn.prop('disabled', false).html(originalHtml);
             }
-        };
-        bs.find('.wt-bs-comm-gen').on('click touchend', commGenHandler);
-
-        // v0.9.0: 🟢 실시간 탭 내부 버튼들 (인라인 ✨ 새 반응 + 우하단 FAB) — 동일 핸들러
-        bs.find('.wt-bs-comm-gen-inline, .wt-bs-comm-fab').on('click touchend', commGenHandler);
+        });
 
         // v0.9.0: ⛶ 전체화면 버튼 → 기존 풀스크린 오버레이 호출
         bs.find('.wt-bs-comm-fs').on('click touchend', function(e) {
@@ -3551,8 +3606,9 @@ ${trimmed.substring(0, 1500)}`;
         });
 
         // 지도 클릭 → 바텀시트 peek 복귀 (T1: 닫기 대신 peek)
-        $(document).off('click.wtMap', '#wt-leaflet-container').on('click.wtMap', '#wt-leaflet-container', (e) => {
-            if ($(e.target).closest('.wt-bs, .wt-bs-handle, .wt-gmap-pin, .leaflet-marker-icon, .leaflet-popup').length) return;
+        $(document).off('click.wtMap', '#wt-leaflet-container, #wt-map-container').on('click.wtMap', '#wt-leaflet-container, #wt-map-container', (e) => {
+            if (Date.now() - (window._wtMapPinOpenAt || 0) < 450) return;
+            if ($(e.target).closest('.wt-bs, .wt-bs-handle, .wt-gmap-pin, .wt-location-node, .leaflet-marker-icon, .leaflet-popup').length) return;
             if (self._bsStage > 1) {
                 self._applyBsStage(1); // peek으로 복귀
             } else if (self._bsStage === 1) {
@@ -5982,10 +6038,14 @@ JSON만 응답한다. 앞뒤 설명, 코드블록, 주석은 금지한다.`;
             return true;
         };
 
-        // r22: FAB (✨) — 명시적 생성 버튼
-        overlay.find('#wt-comm-fab').on('click touchend', async (e) => {
+        // r22: FAB (✨) — pointerup/click 중 먼저 들어온 한 번만 처리
+        let _fabActivatedAt = 0;
+        overlay.find('#wt-comm-fab').on('pointerup click', async (e) => {
             e.preventDefault();
             e.stopPropagation();
+            const now = Date.now();
+            if (now - _fabActivatedAt < 450) return;
+            _fabActivatedAt = now;
             await refreshFeed();
         });
 
@@ -7233,6 +7293,8 @@ CRITICAL: Start with { end with }`;
             const charContext = [charDesc, charPersonality, charScenario].filter(Boolean).join(' | ').substring(0, 500);
             const s = extension_settings[EXTENSION_NAME];
             const langInst = this._getLangInstruction('review');
+            const isFantasyReview = s?.fantasyTheme === true;
+            const reviewWorldMode = this._plainText(this.lm.fantasyWorldMode || '판타지 세계', 120) || '판타지 세계';
 
             // 이벤트 요약 (최근 5개)
             const evSummary = (loc.events || []).slice(-5).map(e => `${e.mood||'📝'} ${e.title||e.text||''}`).join(', ') || '아직 이벤트 없음';
@@ -7253,7 +7315,9 @@ CRITICAL: Start with { end with }`;
             // ★ 터줏대감 목록 (리뷰어로 활용)
             const npcList = (loc.npcs || []).map(n => `"${n.name}"(${n.role || n.type})`).join(', ');
 
-            const prompt = `You are writing Google Maps-style character reviews for an RP location. Each reviewer has STRONG opinions, personal grudges, inside jokes, and emotional memories tied to this place. Write like real people leaving passionate, opinionated, sometimes petty reviews.
+            const prompt = `${isFantasyReview
+                ? `You are writing in-world visitor testimonies for an RP location in the setting "${reviewWorldMode}". The UI displays them as reviews, but the wording, occupations, objects, customs, and communication methods must belong naturally to that era/world. Never mention Google Maps, social media, smartphones, modern apps, or modern review platforms unless they canonically exist in the supplied RP context.`
+                : 'You are writing Google Maps-style character reviews for an RP location.'} Each reviewer has STRONG opinions, personal grudges, inside jokes, and emotional memories tied to this place. Write like real people leaving passionate, opinionated, sometimes petty reviews.
 
 Generate ${reviewCount} reviews.
 Place: "${loc.name}" | Visits: ${loc.visitCount || 0} | Memo: "${loc.memo || ''}"

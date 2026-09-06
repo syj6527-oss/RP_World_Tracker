@@ -260,6 +260,20 @@
 .wt-leaflet-full #wt-search-input::placeholder{color:rgba(60,64,67,.75)!important}
 /* 뒤로가기 버튼 — 제거(헤더 ✕로 닫음) */
 .wt-leaflet-full .wt-back-btn{display:none!important}
+
+/* 🏰 판타지 지도도 PAW MAP과 동일한 풀스크린 구조를 사용 */
+.wt-fantasy-full{display:flex!important;flex-direction:column!important}
+.wt-fantasy-full #wt-map-section{flex:1!important;display:flex!important;flex-direction:column!important;overflow:visible!important;position:relative!important}
+.wt-fantasy-full #wt-map-wrap{flex:1!important;display:flex!important;flex-direction:column!important;position:relative!important;overflow:hidden!important}
+.wt-fantasy-full #wt-map-container{flex:1!important;height:auto!important;min-height:0!important;aspect-ratio:auto!important;border:none!important;border-radius:0!important}
+.wt-fantasy-full #wt-map-container .wt-map-svg{width:100%!important;height:100%!important;min-height:0!important;display:block}
+.wt-fantasy-full .wt-map-mode-bar{display:none!important}
+.wt-fantasy-full #wt-search-bar{position:absolute!important;top:8px;left:8px;right:8px;z-index:20!important}
+.wt-fantasy-full #wt-search-tabs{display:none!important}
+.wt-fantasy-full #wt-search-input{background:rgba(255,255,255,.88)!important;backdrop-filter:blur(5px)!important;-webkit-backdrop-filter:blur(5px)!important;box-shadow:0 1px 7px rgba(70,45,20,.12)!important;border-radius:22px!important;border:1px solid rgba(139,105,20,.2)!important;padding:10px 42px 10px 14px!important;font-size:13px!important}
+.wt-fantasy-full #wt-fantasy-context-bar{position:absolute!important;top:55px;left:8px;right:8px;z-index:20!important;background:rgba(255,255,255,.9)!important;border:1px solid rgba(139,105,20,.24)!important;box-shadow:0 1px 7px rgba(70,45,20,.1)!important}
+.wt-fantasy-full .wt-back-btn{display:none!important}
+.wt-fantasy-full #wt-btn-refresh{position:absolute;right:5px;z-index:2;opacity:.7!important}
 /* Full 바텀시트 */
 .wt-bs-full{position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;max-height:none!important;height:100%!important;border-radius:0!important;z-index:9999!important;background:#fff!important}
 
