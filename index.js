@@ -1,4 +1,4 @@
-// 🐶 PAW MAP v0.9.61-beta
+// 🐶 PAW MAP v0.10.0-beta
 
 import { getContext, extension_settings } from '../../../extensions.js';
 import { eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';
@@ -210,7 +210,10 @@ async function commitDetectedPlace(candidate) {
         : lm.findByNameExact(candidate.name);
     let created = false;
     if (!location) {
-        location = await lm.addLocation(candidate.name, '', [], { source });
+        location = await lm.addLocation(candidate.name, '', [], {
+            source,
+            fictional: extension_settings[EXTENSION_NAME]?.fantasyTheme === true,
+        });
         created = Boolean(location);
     }
     if (!location) return null;
@@ -225,7 +228,7 @@ async function commitDetectedPlace(candidate) {
     }
 
     // 사용자가 따로 켠 경우에만 감지 장소명을 Photon에 보내 추정 핀을 실제 좌표로 교체한다.
-    if (created && extension_settings[EXTENSION_NAME]?.allowAutoGeocoding === true && !location.parentId && !lm.isSubLocation(location.name)) {
+    if (created && extension_settings[EXTENSION_NAME]?.allowAutoGeocoding === true && extension_settings[EXTENSION_NAME]?.fantasyTheme !== true && !location.parentId && !lm.isSubLocation(location.name)) {
         const current = lm.locations.find(item => item.id === lm.currentLocationId && item.lat != null && item.lng != null && !item.parentId);
         const geocoded = await _geocodeQuiet(location.name, false, current ? { lat: current.lat, lng: current.lng } : null);
         if (geocoded) {
@@ -826,6 +829,9 @@ async function init() {
     }
     extension_settings[EXTENSION_NAME].eventLang = extension_settings[EXTENSION_NAME].eventLang === 'en' ? 'en' : 'ko';
     extension_settings[EXTENSION_NAME].mapSearchLanguage = extension_settings[EXTENSION_NAME].mapSearchLanguage === 'en' ? 'en' : 'ko';
+    extension_settings[EXTENSION_NAME].fantasyTheme = extension_settings[EXTENSION_NAME].fantasyTheme === true;
+    if (extension_settings[EXTENSION_NAME].fantasyTheme) extension_settings[EXTENSION_NAME].mapMode = 'fantasy';
+    else if (extension_settings[EXTENSION_NAME].mapMode === 'fantasy') extension_settings[EXTENSION_NAME].mapMode = 'leaflet';
     extension_settings[EXTENSION_NAME].debugMode = false;
     // 구버전 마이그레이션 표식은 유지하되 v0.9.49 복구값을 다시 덮지 않는다.
     if (!extension_settings[EXTENSION_NAME]._migrated_v090) {

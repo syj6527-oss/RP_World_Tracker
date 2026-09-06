@@ -1,4 +1,4 @@
-# PAW MAP 보안 메모 — v0.9.61-beta
+# PAW MAP 보안 메모 — v0.10.0-beta
 
 ## 보호 목표
 

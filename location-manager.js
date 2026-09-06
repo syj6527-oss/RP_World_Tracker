@@ -77,6 +77,7 @@ export class LocationManager {
         this.movements = [];
         this.distances = [];
         this.ignoredDetectedNames = [];
+        this.fantasyWorldMode = '';
     }
 
     _sanitizeEvent(event = {}) {
@@ -422,7 +423,7 @@ export class LocationManager {
 
     async loadChat() {
         this.currentChatId = this.getDataKey();
-        if (!this.currentChatId) { this.locations=[]; this.movements=[]; this.distances=[]; this.ignoredDetectedNames=[]; this.currentLocationId=null; this.currentSubLocationId=null; return; }
+        if (!this.currentChatId) { this.locations=[]; this.movements=[]; this.distances=[]; this.ignoredDetectedNames=[]; this.fantasyWorldMode=''; this.currentLocationId=null; this.currentSubLocationId=null; return; }
         const storedLocations = await this.db.getLocationsByChatId(this.currentChatId) || [];
         this.locations = storedLocations.map(location => this._sanitizeLocationRecord(location));
         for (let i = 0; i < this.locations.length; i++) {
@@ -468,6 +469,7 @@ export class LocationManager {
         this.ignoredDetectedNames = Array.isArray(cfg?.ignoredDetectedNames)
             ? [...new Set(cfg.ignoredDetectedNames.slice(0, 300).map(normalizedDetectionName).filter(Boolean))]
             : [];
+        this.fantasyWorldMode = safeText(cfg?.fantasyWorldMode, 120);
         // Old builds could persist a child ID as the world-map current location.
         // Repair only the config pointer; the child, its events and its parent stay untouched.
         if (recoveredCurrent.repaired) await this._saveCfg();
@@ -531,7 +533,7 @@ export class LocationManager {
         const anchor = this.locations.find(location =>
             location.id === this.currentLocationId && location.lat != null && location.lng != null && !location.parentId
         );
-        if (anchor) {
+        if (anchor && options.fictional !== true) {
             const approximate = approximateCoordinatesNear(anchor, `${loc.id}|${safeName}`, 30, 150);
             if (approximate) {
                 loc.lat = approximate.lat;
@@ -694,7 +696,14 @@ export class LocationManager {
             currentLocationId: this.currentLocationId,
             currentSubLocationId: this.currentSubLocationId,
             ignoredDetectedNames: this.ignoredDetectedNames.slice(-300),
+            fantasyWorldMode: safeText(this.fantasyWorldMode, 120),
         });
+    }
+
+    async setFantasyWorldMode(value) {
+        this.fantasyWorldMode = safeText(value, 120);
+        await this._saveCfg();
+        return this.fantasyWorldMode;
     }
 
     _autoPos() {

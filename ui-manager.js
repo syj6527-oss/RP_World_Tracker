@@ -360,7 +360,7 @@ export class UIManager {
     createSettingsPanel() {
         const html = `<div id="wt-settings" class="wt-settings"><div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.9.61-beta</span></b>
+                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.10.0-beta</span></b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div><div class="inline-drawer-content">
                 <div style="font-size:12px;font-weight:800;margin:2px 0 7px">기본 설정</div>
@@ -795,7 +795,7 @@ export class UIManager {
                 <div class="wt-panel-title"><span>🐾</span> PAW MAP</div>
                 <div style="display:flex;gap:4px;align-items:center">
                     <button id="wt-candidate-btn" class="wt-btn-icon" style="font-size:16px;position:relative" title="장소 후보함">🪧<span class="wt-candidate-badge" style="display:none;position:absolute;right:-3px;top:-4px;min-width:15px;height:15px;line-height:15px;border-radius:8px;background:#E2574C;color:#fff;font-size:9px;font-weight:700;text-align:center;padding:0 2px">0</span></button>
-                    <button id="wt-fantasy-btn" class="wt-btn-icon" style="font-size:16px;opacity:.5" title="판타지 모드 (업뎃 예정)">🏰</button>
+                    <button id="wt-fantasy-btn" class="wt-btn-icon" style="font-size:16px" title="판타지 모드 켜기/끄기">🏰</button>
                     <button id="wt-data-btn" class="wt-btn-icon" style="font-size:16px">⚙️</button>
                     <button id="wt-close-btn" class="wt-btn-icon">✕</button>
                 </div>
@@ -822,6 +822,11 @@ export class UIManager {
                         <button id="wt-mode-leaflet" class="wt-mode-btn wt-mode-active">🐾 PAW MAP</button>
                         <button id="wt-mode-node" class="wt-mode-btn">🗺️ 약도</button>
                         <button id="wt-mode-fantasy" class="wt-mode-btn" style="display:none">🏰 지도</button>
+                    </div>
+                    <div id="wt-fantasy-context-bar" style="display:none;align-items:center;gap:5px;padding:7px 8px;background:rgba(244,228,193,.72);border:1px solid #A0825C;border-radius:9px;margin:5px 0">
+                        <span style="font-size:12px;white-space:nowrap">📜 세계관</span>
+                        <input id="wt-fantasy-context-input" type="text" maxlength="120" class="wt-input" placeholder="예: 중세 판타지, 조선시대, 무협" style="flex:1;min-width:0;font-size:11px;padding:6px 7px"/>
+                        <button id="wt-fantasy-context-save" type="button" class="wt-btn-primary" style="padding:6px 9px;font-size:11px;white-space:nowrap">적용</button>
                     </div>
                     <div id="wt-search-bar" class="wt-search-bar" style="position:relative">
                         <button class="wt-back-btn" type="button" style="display:none" title="닫기">✕</button>
@@ -946,6 +951,7 @@ export class UIManager {
                                 <button id="wt-pop-sub-add" class="wt-btn-accent wt-btn-s" style="font-size:14px;padding:4px 8px">+</button>
                             </div>
                         </div>
+                        <button id="wt-pop-community" class="wt-btn-primary" style="display:none;width:100%;margin-top:6px">📜 세계관 소식</button>
                         <div class="wt-pop-actions"><button id="wt-pop-save" class="wt-btn-primary">💾 저장</button><button id="wt-pop-del" class="wt-btn-danger">🗑️</button></div>
                         <button id="wt-pop-move" class="wt-btn-ghost wt-btn-sm">📍 위치 수정</button>
                         <button id="wt-pop-moveto" class="wt-btn-accent wt-btn-sm" style="opacity:1;font-size:12px">📍 현재 위치로 지정</button>
@@ -1013,8 +1019,25 @@ export class UIManager {
         });
         this._updateCandidateBadge();
 
-        // 🏰 판타지 모드 — 업뎃 예정 (활성화 비활성, 안내만)
-        $('#wt-fantasy-btn').on('click', () => wtNotify('🏰 판타지 모드는 업데이트 예정 중이에요! 조금만 기다려주세요 🐾', 'new', 3500));
+        // 🏰 판타지 모드 — 수동 장소 지도 + 세계관 맞춤 소식망
+        $('#wt-fantasy-btn').on('click', () => this._toggleFantasyTheme());
+        const saveFantasyWorldMode = async () => {
+            const value = String($('#wt-fantasy-context-input').val() || '').replace(/[<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+            if (!this.lm.currentChatId) await this.lm.loadChat();
+            const saved = await this.lm.setFantasyWorldMode(value);
+            $('#wt-fantasy-context-input').val(saved);
+            toastSuccess(saved ? `📜 ${saved} · 다음 소식부터 적용` : '📜 기본 판타지 세계로 적용');
+        };
+        $('#wt-fantasy-context-save').on('click', saveFantasyWorldMode);
+        $('#wt-fantasy-context-input').on('keydown', event => {
+            if (event.key === 'Enter') { event.preventDefault(); saveFantasyWorldMode(); }
+        });
+        $('#wt-pop-community').on('click', () => {
+            const locId = $('#wt-popover').attr('data-id');
+            if (!locId) return;
+            this.hidePop();
+            this._showCommunityFullFeed(locId);
+        });
 
         // 데이터 관리 메뉴
         $('#wt-data-btn').on('click', () => $('#wt-data-menu').toggle());
@@ -1499,9 +1522,8 @@ ${trimmed.substring(0, 1500)}`;
         this.panelVisible = show ?? !this.panelVisible;
         if (this.panelVisible) {
             $('#wt-panel').addClass('wt-panel-open').css('opacity',(extension_settings[EXTENSION_NAME]?.panelOpacity??100)/100);
-            // 판타지 테마 상태 복원 (v0.9.29: 판타지 모드 업뎃 예정 — 강제 비활성)
+            // 판타지 테마 상태 복원
             const s = extension_settings[EXTENSION_NAME];
-            if (s) s.fantasyTheme = false;
             if (s?.fantasyTheme) {
                 $('#wt-panel').addClass('wt-panel-fantasy');
                 $('#wt-fantasy-btn').css({ background: '#DAA520', borderRadius: '6px' });
@@ -1510,17 +1532,21 @@ ${trimmed.substring(0, 1500)}`;
                 // Task 3: 모드 바 복원
                 $('#wt-mode-node, #wt-mode-leaflet').hide();
                 $('#wt-mode-fantasy').show().text('🏰 지도').addClass('wt-mode-active');
+                $('#wt-fantasy-context-bar').css('display', 'flex');
+                $('#wt-fantasy-context-input').val(this.lm.fantasyWorldMode || '');
             } else {
                 $('.wt-panel-title span:first').text('🐶');
                 $('.wt-scene-icon').text('🦴');
                 $('#wt-mode-node, #wt-mode-leaflet').show();
                 $('#wt-mode-fantasy').hide();
+                $('#wt-fantasy-context-bar').hide();
             }
             this.refresh();
             // ★ v0.6.0: 패널 열면 자동으로 Paw Maps 풀스크린
             $('#wt-map-section').show();
             setTimeout(() => {
-                if (!this._isLeafletFull) this._setMapMode('leaflet');
+                const targetMode = s?.fantasyTheme ? 'fantasy' : 'leaflet';
+                if (!this._isLeafletFull || targetMode === 'fantasy') this._setMapMode(targetMode);
             }, 400);
             setTimeout(() => {
                 if (this.leafletRenderer?.map) this.leafletRenderer.invalidateSize();
@@ -1545,9 +1571,12 @@ ${trimmed.substring(0, 1500)}`;
         if (isFantasy) {
             $('#wt-mode-node, #wt-mode-leaflet').hide();
             $('#wt-mode-fantasy').show().text('🏰 지도');
+            $('#wt-fantasy-context-bar').css('display', 'flex');
+            $('#wt-fantasy-context-input').val(this.lm.fantasyWorldMode || '');
         } else {
             $('#wt-mode-node, #wt-mode-leaflet').show();
             $('#wt-mode-fantasy').hide();
+            $('#wt-fantasy-context-bar').hide();
         }
 
         if (isFantasy) {
@@ -1556,10 +1585,14 @@ ${trimmed.substring(0, 1500)}`;
             if (s.mapMode !== 'fantasy') s._prevMapMode = s.mapMode || 'leaflet';
             this._setMapMode('fantasy');
             wtNotify(`🐺 ${treat} 판타지 모드!`, 'move', 2000);
+            if (!String(this.lm.fantasyWorldMode || '').trim()) {
+                setTimeout(() => $('#wt-fantasy-context-input').trigger('focus'), 250);
+                wtNotify('📜 세계관 모드를 입력하면 소식망이 그 시대에 맞게 바뀌어요.', 'info', 3200);
+            }
         } else {
             $('#wt-panel').removeClass('wt-panel-fantasy');
             $('#wt-fantasy-btn').css({ background: 'none', borderRadius: '' });
-            this._setMapMode(s._prevMapMode || 'node');
+            this._setMapMode(s._prevMapMode || 'leaflet');
             wtNotify(`🐶 ${treat} 일반 모드`, 'info', 1500);
         }
 
@@ -1569,6 +1602,8 @@ ${trimmed.substring(0, 1500)}`;
         } else {
             $('#wt-pop-icon-type').closest('div').hide();
         }
+        $('#wt-pop-community').toggle(isFantasy);
+        $('#wt-pop-geo-section').toggle(!isFantasy);
     }
 
     // 채팅 전환 시 지도 완전 리셋
@@ -1601,6 +1636,7 @@ ${trimmed.substring(0, 1500)}`;
         await this.lm.loadChat();
         const s = extension_settings[EXTENSION_NAME];
         const mode = s?.mapMode || 'leaflet';
+        if (s?.fantasyTheme) $('#wt-fantasy-context-input').val(this.lm.fantasyWorldMode || '');
 
         // 노드 그래프 (node + fantasy 공유)
         if (mode === 'node' || mode === 'fantasy') {
@@ -1890,7 +1926,7 @@ ${trimmed.substring(0, 1500)}`;
         if (!this.lm.currentChatId) { toastWarn('채팅방 선택'); return; }
         if (this.lm.findByNameExact(name)) { toastWarn(`"${name}" 존재`); return; }
         const aliases=$('#wt-input-aliases').val().split(',').map(a=>a.trim()).filter(Boolean);
-        const loc = await this.lm.addLocation(name, '', aliases);
+        const loc = await this.lm.addLocation(name, '', aliases, { fictional: extension_settings[EXTENSION_NAME]?.fantasyTheme === true });
         if (loc) { toastSuccess(`"${name}" 추가!`); $('#wt-input-name,#wt-input-aliases').val(''); $('#wt-add-form').slideUp(200); $('#wt-add-arrow').text('▾'); this.refresh(); }
     }
 
@@ -1932,6 +1968,8 @@ ${trimmed.substring(0, 1500)}`;
         // Bug D: 아이콘 선택은 판타지 모드에서만 표시
         const s2 = extension_settings[EXTENSION_NAME];
         if (s2?.fantasyTheme) { $('#wt-pop-icon-type').closest('div').show(); } else { $('#wt-pop-icon-type').closest('div').hide(); }
+        $('#wt-pop-community').toggle(s2?.fantasyTheme === true).text(s2?.fantasyTheme ? '📜 세계관 소식 보기' : '💬 커뮤니티 보기');
+        $('#wt-pop-geo-section').toggle(s2?.fantasyTheme !== true);
         // Task 6: 좌표 없으면 안내 표시
         if (!l.lat && !l.lng) { $('#wt-pop-geo-notice').show(); } else { $('#wt-pop-geo-notice').hide(); }
         // 현재 주소 표시
@@ -5234,6 +5272,9 @@ ${trimmed.substring(0, 1500)}`;
     async _requestCommunityGeneration(locId, forceAsk = false) {
         // v0.9.53: "이 선택 기억하기" — 기억돼 있으면 팝업 없이 저장된 모드로 바로 생성
         const s = extension_settings[EXTENSION_NAME] || {};
+        // 판타지 모드는 사용자가 입력한 세계관 문구 + 저장된 RP 정보만 사용한다.
+        // 현실 좌표 보강 선택창은 표시하지 않는다.
+        if (s.fantasyTheme === true) return await this._generateCommunity(locId, 'off');
         if (!forceAsk && s.communityGenRemember === true) {
             let mode = ['off', 'overpass', 'grounding'].includes(s.locationEnrichment) ? s.locationEnrichment : 'off';
             // grounding 유효성 재검증 (설정 바뀌었으면 강등)
@@ -5270,6 +5311,10 @@ ${trimmed.substring(0, 1500)}`;
         }
         // 실제 장소 정보는 Vertex Express 키 연결에서만 사용한다.
         const sG = extension_settings[EXTENSION_NAME] || {};
+        const isFantasyCommunity = sG.fantasyTheme === true;
+        const fantasyWorldMode = this._plainText(this.lm.fantasyWorldMode || '일반 판타지 세계', 120) || '일반 판타지 세계';
+        // 판타지 지도에서는 현실 좌표와 외부 장소 검색을 커뮤니티에 섞지 않는다.
+        if (isFantasyCommunity) enrichMode = 'off';
         if (enrichMode === 'grounding' && (sG.llmMode !== 'direct' || !getVertexApiKey())) {
             toastWarn('구글 검색 사용 불가 (Vertex 키 필요) — 기본 생성으로 진행합니다.');
             enrichMode = 'off';
@@ -5318,6 +5363,9 @@ ${trimmed.substring(0, 1500)}`;
                 : '없음';
             const evSummary = (loc.events || []).slice(-2).map(e => `${e.mood||'📝'} ${e.title||e.text?.substring(0,30)}`).join(', ') || 'none';
             const langInst = this._getLangInstruction('community');
+            const fantasyLangInst = (extension_settings[EXTENSION_NAME]?.eventLang === 'en')
+                ? 'Write every display string in English.'
+                : '모든 표시 문자열을 한국어로 작성한다. 고유명사는 설정에 나온 표기를 유지한다.';
             const gen = this._getGenSize().community;
             const countLabel = gen.label;  // "7~9개"
             let poiContext = '';
@@ -5326,7 +5374,9 @@ ${trimmed.substring(0, 1500)}`;
                 const sM = extension_settings[EXTENSION_NAME] || {};
                 const modeTag = (sM.llmMode === 'direct') ? '🔑 Vertex 키' : '🔗 연결 프로필';
                 const enrichTag = enrichMode === 'grounding' ? ' + ⭐실제장소' : enrichMode === 'overpass' ? ' + 🌿주변보강' : '';
-                toastSuccess(`💬 커뮤니티 생성 시작 — ${modeTag}${enrichTag}`);
+                toastSuccess(isFantasyCommunity
+                    ? `📜 ${fantasyWorldMode} 소식 생성 시작 — ${modeTag}`
+                    : `💬 커뮤니티 생성 시작 — ${modeTag}${enrichTag}`);
             }
             if (enrichMode === 'overpass') {
                 toastSuccess('🔍 주변 POI 검색 중...');
@@ -5453,7 +5503,7 @@ ${groundedItems.map(fact => `${fact.id} (${fact.kind}): ${fact.text}`).join('\n'
                 },
             ).join(' / ');
 
-            const prompt = `이 장소 주변에서 흘러나오는 **트위터 실시간 피드**를 생성해줘. 지역/장소 해시태그로 모인 **익명의 아무나**가 쓴 글들이다.
+            const modernPrompt = `이 장소 주변에서 흘러나오는 **트위터 실시간 피드**를 생성해줘. 지역/장소 해시태그로 모인 **익명의 아무나**가 쓴 글들이다.
 
 ⚠️⚠️⚠️ **JSON 안전 규칙 (최우선!)** ⚠️⚠️⚠️
 본문은 순수 텍스트로만 작성. HTML, Markdown 링크, 이미지 URL, 외부 리소스, 스크립트는 절대 출력하지 말 것.
@@ -5597,6 +5647,77 @@ JSON 출력 예시 — **이건 형식/구조만 참고해. 내용은 절대 따
 
 JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
 
+            const nearbyWorldPlaces = this.lm.locations
+                .filter(place => !place.parentId && place.id !== loc.id)
+                .slice(0, 10)
+                .map(place => place.name)
+                .join(', ') || '없음';
+            const fantasyPrompt = `현재 RP 세계 안에서 이 장소를 둘러싸고 오가는 **시대·세계관 내부의 소식과 풍문**을 생성해라.
+
+[사용자가 직접 지정한 세계관 모드 — 최우선]
+${fantasyWorldMode}
+
+이 문구를 시대, 기술 수준, 사회 제도, 정보 전달 수단과 말투를 정하는 최우선 기준으로 사용한다.
+예를 들어 "중세시대"라면 선술집 풍문·시장 소문·포고·길드 전언처럼 구성하고, "조선시대"라면 장터·주막·관아 주변·행상과 주민의 입소문처럼 구성한다. 단, 예시는 방향일 뿐이며 현재 입력과 RP 설정에 맞는 수단을 스스로 선택한다.
+마법 통신망, 신문, 라디오, 인터넷, SNS 같은 수단은 사용자 입력이나 RP 맥락에서 존재가 확인될 때만 사용한다.
+
+⚠️ JSON 안전 규칙:
+- 유효한 JSON 객체 하나만 출력한다.
+- 본문은 순수 텍스트만 사용한다. HTML, Markdown 링크, URL, 이미지, 스크립트를 출력하지 않는다.
+- 모든 문자열을 JSON 규칙에 맞게 이스케이프한다.
+
+[현재 장소와 세계 맥락]
+장소: "${loc.name}"
+장소 설명: ${this._plainText(loc.aiNotes || '없음', 500)}
+다른 등록 장소: ${nearbyWorldPlaces}
+최근 이곳 사건: ${evSummary}
+이곳의 등록 인물: ${npcList}
+유저: "${userName}"
+메인 캐릭터: "${charName}"
+캐릭터 단서: ${this._plainText(charDesc || '없음', 180)}
+${isGroupChat && groupMembers.length ? `다른 등장인물: ${groupMembers.slice(0,4).join(', ')}\n` : ''}
+${fantasyLangInst}
+${recentChat ? `\n[최근 RP 맥락 — 현재 장소와 직접 이어지는 공개적 장면만 사용]\n${recentChat.substring(0, 800)}\n` : ''}
+
+[핵심 원칙]
+- 이것은 현대 SNS를 시대극 말투로 바꾼 것이 아니다. 해당 세계에서 실제로 정보가 퍼지는 모습을 보여준다.
+- 전체 ${countLabel} 항목을 서로 다른 주민·상인·병사·관리·사제·여행자·하인·행상·모험가 등 세계와 장소에 맞는 화자로 구성한다.
+- 화자의 신분, 계층, 지역, 지식 범위에 맞는 어휘를 쓴다. 모두가 같은 현대 한국어 인터넷 말투로 말하지 않는다.
+- 현재 장소와 등록된 설정을 구체적으로 반영하되, 설정에 없는 제도·마법·기술·역사적 사실을 확정해서 만들지 않는다.
+- 비밀 설정, 인물의 속마음, 비공개 대화는 소문으로도 유출하지 않는다. 화자가 직접 보거나 들을 수 있는 내용만 사용한다.
+- 최근 RP 목격담은 현재 장소에서 제3자가 실제로 목격 가능한 장면이 있을 때만 최대 2개 사용한다.
+- 서로 모순되는 풍문은 가능하지만, 거짓임을 아는 전지적 설명을 붙이지 않는다.
+- 현대 디지털 매체가 확인되지 않았다면 트윗, 포스트, 피드, 계정, 아이디, 해시태그, 좋아요, 팔로워, DM, 온라인 같은 단어와 @/# 표기를 절대 쓰지 않는다.
+
+[구성]
+- 총 ${countLabel}개를 출력한다.
+- 정확한 개수표: ${mixPlan}.
+- source:"place"는 현재 장소의 풍경·규칙·생활·물가·불편·사건·소문처럼 장소 자체에 기반한 항목이다.
+- source:"chat"은 최근 RP에서 공개적으로 목격 가능한 장면이다.
+- source:"local"은 주변 주민의 일상이나 지역 풍문이다.
+- source:"animal"은 세계관에 어울릴 때만 최대 1개 사용한다.
+- 장소 기반 source:"place"를 전체의 60~70%로 맞춘다.
+- voice는 dry, rant, burst, chatty, soft, info 중 하나를 쓰고 최소 4종을 섞는다. 같은 voice는 최대 2개다.
+
+[화자와 반응]
+- name에는 시대와 장소에 어울리는 이름·별칭·역할을 쓴다.
+- handle에는 소속·신분·소문의 출처를 짧게 쓴다. 디지털 통신망이 없는 세계에서는 @를 붙이지 않는다.
+- avatar는 화자에 어울리는 이모지 하나만 쓴다.
+- 사람은 type:"anon", 동물은 type:"animal"이다.
+- text는 1~3문장 중심으로 쓰되 길이와 리듬을 섞는다. 현대 밈과 인터넷 은어는 세계관에 실제로 존재하지 않으면 쓰지 않는다.
+- replies는 그 소식을 들은 다른 인물이 덧붙인 짧은 말 0~2개다. replies도 name, handle, avatar, text 구조를 사용한다.
+- likes는 UI 호환용 숫자이며 0~15 사이로만 출력한다. 본문에서 좋아요라고 부르지 않는다.
+- factIds는 항상 빈 배열 []로 출력한다.
+
+[출력 구조]
+{"posts":[
+  {"name":"화자 이름 또는 별칭","handle":"신분·소속 또는 출처","avatar":"이모지 하나","type":"anon","source":"place","voice":"dry","mood":"chill","moodLabel":"짧은 상태","text":"세계관 내부의 소식이나 풍문","likes":4,"factIds":[],"replies":[]}
+]}
+
+JSON만 응답한다. 앞뒤 설명, 코드블록, 주석은 금지한다.`;
+
+            const prompt = isFantasyCommunity ? fantasyPrompt : modernPrompt;
+
             // 자연스러움을 위해 기본 temperature(0.7)를 유지하고 분량만 확장한다.
             let result = await callLLM(prompt, { maxTokens: gen.maxTokens, temperature: 0.7 });
             if (!chatGuard()) { toastWarn('채팅이 바뀌어 생성 결과를 저장하지 않았습니다.'); return false; }
@@ -5707,7 +5828,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                 // v0.9.0: 답글 정제 (name/handle/avatar/text만 유지, 최대 3개)
                 const cleanReplies = Array.isArray(p.replies) ? p.replies.slice(0, 3).filter(r => r && r.text).map(r => ({
                     name: this._plainText(r.name || '익명', 60),
-                    handle: this._plainText(r.handle || '', 60),
+                    handle: this._plainText(r.handle || (isFantasyCommunity ? '덧붙인 말' : ''), 60),
                     avatar: this._firstGrapheme(r.avatar || '👤'),
                     text: this._plainText(r.text, 200),
                 })) : [];
@@ -5718,7 +5839,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
                     : ['place', 'chat', 'local', 'animal'].includes(p.source) ? p.source : (p.type === 'animal' ? 'animal' : 'local');
                 return {
                     name: this._plainText(p.name || 'Unknown', 60),
-                    handle: this._plainText(p.handle || '', 60),
+                    handle: this._plainText(p.handle || (isFantasyCommunity ? '떠도는 풍문' : ''), 60),
                     avatar: this._firstGrapheme(p.avatar || '👤'),
                     type: ['anon', 'animal'].includes(p.type) ? p.type : 'anon',
                     source,
@@ -5754,7 +5875,9 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
             for (const post of cleanPosts) {
                 await this.lm.addCommunityPost(locId, post);
             }
-            toastSuccess(groundedItems.length
+            toastSuccess(isFantasyCommunity
+                ? `📜 ${fantasyWorldMode} 소식 ${cleanPosts.length}개 생성!`
+                : groundedItems.length
                 ? `⭐ 실제 정보 ${groundedFacts.length}개 · 인근 실명 ${groundedNearbyPlaces.length}개 · 피드 ${cleanPosts.length}개 생성!`
                 : `💬 ${cleanPosts.length}개 반응 생성!`);
             this.pi?.inject();
@@ -5791,27 +5914,31 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
         if (!loc) return;
         $('#wt-community-overlay').remove();
 
+        const fantasy = extension_settings[EXTENSION_NAME]?.fantasyTheme === true;
+        const worldMode = this._plainText(this.lm.fantasyWorldMode || '판타지 세계', 120) || '판타지 세계';
+        const communityTitle = fantasy ? `${worldMode} · 세계관 소식` : '실시간 커뮤니티';
+        const reactionWord = fantasy ? '소식' : '반응';
         const posts = loc.community || [];
-        const postsHtml = posts.length ? posts.map(p => this._renderCommunityPostCard(p, loc.id)).join('') : '<div style="padding:60px 20px;text-align:center;color:#8B98A5;font-size:13px">아직 반응이 없어요<br><span style="font-size:11px">✨ 버튼을 눌러 실시간 반응을 생성해보세요</span></div>';
+        const postsHtml = posts.length ? posts.map(p => this._renderCommunityPostCard(p, loc.id)).join('') : `<div style="padding:60px 20px;text-align:center;color:#8B98A5;font-size:13px">아직 ${reactionWord}이 없어요<br><span style="font-size:11px">✨ 버튼을 눌러 새 ${reactionWord}을 생성해보세요</span></div>`;
 
-        const overlay = $(`<div id="wt-community-overlay" style="position:fixed !important;top:0 !important;left:0 !important;width:100vw !important;height:100vh;height:100dvh !important;background:#fff !important;z-index:2147483647 !important;display:flex !important;flex-direction:column !important;isolation:isolate">
-            <div style="padding:14px 16px 0;background:#fff;border-bottom:1px solid #EFF3F4;position:sticky;top:0;z-index:50">
+        const overlay = $(`<div id="wt-community-overlay" style="position:fixed !important;top:0 !important;left:0 !important;width:100vw !important;height:100vh;height:100dvh !important;background:${fantasy ? '#F4E4C1' : '#fff'} !important;z-index:2147483647 !important;display:flex !important;flex-direction:column !important;isolation:isolate">
+            <div style="padding:14px 16px 0;background:${fantasy ? '#E8D5A3' : '#fff'};border-bottom:1px solid ${fantasy ? '#A0825C' : '#EFF3F4'};position:sticky;top:0;z-index:50">
                 <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
                     <div id="wt-comm-back" style="font-size:20px;color:#0F1419;cursor:pointer;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%">←</div>
                     <div style="flex:1">
                         <div style="font-size:17px;font-weight:900;color:#0F1419">${this._escapeHtml(loc.name)}</div>
-                        <div style="font-size:12px;color:#536471;display:flex;align-items:center;gap:4px" data-comm-count="1"><span style="width:8px;height:8px;background:#00BA7C;border-radius:50%;display:inline-block;animation:wtLivePulse 2s infinite"></span> 실시간 · ${posts.length}개 반응</div>
+                        <div style="font-size:12px;color:#536471;display:flex;align-items:center;gap:4px" data-comm-count="1"><span>${fantasy ? '📜' : '<span style="width:8px;height:8px;background:#00BA7C;border-radius:50%;display:inline-block;animation:wtLivePulse 2s infinite"></span>'}</span> ${this._escapeHtml(communityTitle)} · ${posts.length}개</div>
                     </div>
                 </div>
             </div>
-            <div id="wt-comm-feed-wrap" style="flex:1;overflow-y:auto;background:#fff;position:relative;overscroll-behavior:contain">
+            <div id="wt-comm-feed-wrap" style="flex:1;overflow-y:auto;background:${fantasy ? '#F4E4C1' : '#fff'};position:relative;overscroll-behavior:contain">
                 <div id="wt-comm-ptr" style="position:absolute;top:0;left:0;right:0;height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#F7F9F9;transition:height .2s;pointer-events:none">
                     <div id="wt-comm-ptr-inner" style="display:flex;align-items:center;gap:8px;font-size:12px;color:#536471;font-weight:500"><span id="wt-comm-ptr-icon" style="display:inline-block;font-size:16px;transition:transform .2s">⬇</span><span id="wt-comm-ptr-text">당겨서 새로고침</span></div>
                 </div>
                 <div id="wt-comm-feed">${postsHtml}</div>
             </div>
-            <button id="wt-comm-mode-chip" title="생성 방식 변경" style="position:absolute;bottom:80px;right:16px;padding:6px 11px;border-radius:16px;background:rgba(255,255,255,.95);color:#3C3028;border:1px solid #E0DCD2;font-size:10.5px;font-weight:700;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.15);touch-action:manipulation;font-family:inherit"></button>
-            <button id="wt-comm-fab" style="position:absolute;bottom:20px;right:16px;width:52px;height:52px;border-radius:50%;background:#1D9BF0;color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 2px 12px rgba(29,155,240,.4);display:flex;align-items:center;justify-content:center;touch-action:manipulation">✨</button>
+            <button id="wt-comm-mode-chip" title="${fantasy ? '세계관 모드 변경' : '생성 방식 변경'}" style="position:absolute;bottom:80px;right:16px;padding:6px 11px;border-radius:16px;background:rgba(255,255,255,.95);color:#3C3028;border:1px solid #E0DCD2;font-size:10.5px;font-weight:700;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.15);touch-action:manipulation;font-family:inherit"></button>
+            <button id="wt-comm-fab" style="position:absolute;bottom:20px;right:16px;width:52px;height:52px;border-radius:50%;background:${fantasy ? '#8B6914' : '#1D9BF0'};color:#fff;border:none;font-size:24px;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.28);display:flex;align-items:center;justify-content:center;touch-action:manipulation">✨</button>
         </div>`);
         $('body').append(overlay);
         this._prepareCommunityPhotos(overlay[0]);
@@ -5848,10 +5975,10 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
             // 오버레이 내용 갱신 (race 없이)
             const loc = self.lm.locations.find(l => l.id === locId);
             const posts = loc?.community || [];
-            const postsHtml = posts.length ? posts.map(p => self._renderCommunityPostCard(p, locId)).join('') : '<div style="padding:60px 20px;text-align:center;color:#8B98A5;font-size:13px">아직 반응이 없어요<br><span style="font-size:11px">✨ 버튼을 눌러 실시간 반응을 생성해보세요</span></div>';
+            const postsHtml = posts.length ? posts.map(p => self._renderCommunityPostCard(p, locId)).join('') : `<div style="padding:60px 20px;text-align:center;color:#8B98A5;font-size:13px">아직 ${reactionWord}이 없어요<br><span style="font-size:11px">✨ 버튼을 눌러 새 ${reactionWord}을 생성해보세요</span></div>`;
             overlay.find('#wt-comm-feed').html(postsHtml);
             self._prepareCommunityPhotos(overlay.find('#wt-comm-feed')[0]);
-            overlay.find('[data-comm-count]').html(`<span style="width:8px;height:8px;background:#00BA7C;border-radius:50%;display:inline-block;animation:wtLivePulse 2s infinite"></span> 실시간 · ${posts.length}개 반응`);
+            overlay.find('[data-comm-count]').html(`${fantasy ? '📜' : '<span style="width:8px;height:8px;background:#00BA7C;border-radius:50%;display:inline-block;animation:wtLivePulse 2s infinite"></span>'} ${self._escapeHtml(communityTitle)} · ${posts.length}개`);
             return true;
         };
 
@@ -5865,6 +5992,7 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
         // v0.9.53: 모드 칩 — 현재 생성 방식 표시 + 탭하면 변경 팝업
         const _modeChipLabel = () => {
             const sC = extension_settings[EXTENSION_NAME] || {};
+            if (sC.fantasyTheme === true) return `📜 ${self._plainText(self.lm.fantasyWorldMode || '판타지 세계', 40)}`;
             const m = sC.locationEnrichment;
             return m === 'grounding' ? '⭐ 실제 장소' : m === 'overpass' ? '🌿 주변 보강' : '💬 기본 생성';
         };
@@ -5876,8 +6004,19 @@ JSON만 응답. 앞뒤에 설명·코드블록·주석 금지.`;
             if (window._wtTapFireLock) return;
             window._wtTapFireLock = true;
             setTimeout(() => window._wtTapFireLock = false, 500);
-            // 팝업으로 모드만 변경 (생성은 안 함) — 선택 결과는 locationEnrichment에 저장됨
-            await self._chooseCommunityMode(locId);
+            if (extension_settings[EXTENSION_NAME]?.fantasyTheme === true) {
+                const current = String(self.lm.fantasyWorldMode || '');
+                const entered = prompt('커뮤니티에 적용할 시대·세계관 모드', current || '중세 판타지');
+                if (entered != null) {
+                    const clean = self._plainText(entered, 120);
+                    const saved = await self.lm.setFantasyWorldMode(clean);
+                    $('#wt-fantasy-context-input').val(saved);
+                    toastSuccess(saved ? `📜 ${saved} · 다음 소식부터 적용` : '📜 기본 판타지 세계로 적용');
+                }
+            } else {
+                // 팝업으로 모드만 변경 (생성은 안 함) — 선택 결과는 locationEnrichment에 저장됨
+                await self._chooseCommunityMode(locId);
+            }
             _updateModeChip();
         });
 
@@ -6494,6 +6633,7 @@ Respond with ONLY a JSON object, no markdown, no explanation:
 
     _renderCommunityPostCard(p, locId) {
         const loc = locId ? this.lm.locations.find(l => l.id === locId) : null;
+        const fantasy = extension_settings[EXTENSION_NAME]?.fantasyTheme === true;
         const moodColors = {
             excited: 'background:#FFF3E0;color:#B36B00',
             chill: 'background:#E8F5FD;color:#1D6FAD',
@@ -6526,8 +6666,8 @@ Respond with ONLY a JSON object, no markdown, no explanation:
                 </div>`;
             }).join('')}
         </div>` : '';
-        return `<div style="padding:12px 16px;border-bottom:1px solid #EFF3F4;display:flex;gap:12px;align-items:flex-start">
-            <div style="width:40px;height:40px;min-width:40px;border-radius:50%;background:${p.type==='animal'?'#FFF8E1':'#E8F0FE'};display:flex;align-items:center;justify-content:center;font-size:20px;line-height:1;flex-shrink:0;overflow:hidden;text-align:center">${this._escapeHtml(avatarChar)}</div>
+        return `<div style="padding:12px 16px;border-bottom:1px solid ${fantasy ? '#C9B583' : '#EFF3F4'};background:${fantasy ? 'rgba(244,228,193,.76)' : '#fff'};display:flex;gap:12px;align-items:flex-start">
+            <div style="width:40px;height:40px;min-width:40px;border-radius:${fantasy ? '8px' : '50%'};background:${p.type==='animal'?'#FFF8E1':(fantasy ? '#E0C98F' : '#E8F0FE')};display:flex;align-items:center;justify-content:center;font-size:20px;line-height:1;flex-shrink:0;overflow:hidden;text-align:center">${this._escapeHtml(avatarChar)}</div>
             <div style="flex:1;min-width:0">
                 <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:2px">
                     <span style="font-size:14px;font-weight:700;color:#0F1419">${this._escapeHtml(p.name || 'Unknown')}</span>
@@ -6538,9 +6678,9 @@ Respond with ONLY a JSON object, no markdown, no explanation:
                 <div style="font-size:14px;color:#0F1419;line-height:1.55;margin-bottom:4px;word-break:break-word">${this._renderCommunityText(p.text)}</div>
                 ${photoHtml}
                 <div style="display:flex;gap:8px;margin-top:4px;margin-left:-8px">
-                    <div style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;color:#536471;cursor:pointer">💬 ${replies.length}</div>
-                    <div style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;color:#536471;cursor:pointer">🔁 0</div>
-                    <div style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;color:#F91880;cursor:pointer">❤️ ${p.likes||0}</div>
+                    <div style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;color:#536471;cursor:pointer">${fantasy ? '🗣️' : '💬'} ${replies.length}</div>
+                    <div style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;color:#536471;cursor:pointer">${fantasy ? '📜' : '🔁'} 0</div>
+                    <div style="display:flex;align-items:center;gap:4px;padding:6px 10px;border-radius:50px;font-size:12px;color:${fantasy ? '#8B6914' : '#F91880'};cursor:pointer">${fantasy ? '🔥' : '❤️'} ${p.likes||0}</div>
                     ${this._pinBtnHtml(loc, 'community', p.name, p.text, ` data-pin-id="${this._escapeHtml(p.id || '')}"`)}
                 </div>
                 ${repliesHtml}
