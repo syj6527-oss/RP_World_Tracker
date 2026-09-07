@@ -1,4 +1,4 @@
-// 🐶 PAW MAP v0.10.1-beta
+// 🐶 PAW MAP v0.10.2-beta
 
 import { getContext, extension_settings } from '../../../extensions.js';
 import { eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';

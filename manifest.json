@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "Yun",
-    "version": "0.10.1-beta",
+    "version": "0.10.2-beta",
     "homePage": "https://github.com/syj6527-oss/RP_World_Tracker",
     "auto_update": false
 }

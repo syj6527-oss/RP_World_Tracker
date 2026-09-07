@@ -527,6 +527,11 @@ export class LocationManager {
             _securitySanitized0947: true,
         };
         const p = this._autoPos(); loc.x = p.x; loc.y = p.y;
+        if (options.fictional === true && Number.isFinite(options.mapPosition?.x) && Number.isFinite(options.mapPosition?.y)) {
+            loc.x = Math.max(-1000000, Math.min(1000000, Math.round(options.mapPosition.x)));
+            loc.y = Math.max(-1000000, Math.min(1000000, Math.round(options.mapPosition.y)));
+            loc._manualXY = true;
+        }
 
         // 좌표가 없는 자동 등록 장소는 현재 장소 반경에 '추정 핀'으로 표시한다.
         // 외부 통신 없이 로컬 계산만 하며, 실제 주소/Street View 좌표로 취급하지 않는다.
@@ -544,7 +549,9 @@ export class LocationManager {
             }
         }
 
-        await this.db.putLocation(loc); this.locations.push(loc); return loc;
+        await this.db.putLocation(loc);
+        if (this.currentChatId === loc.chatId) this.locations.push(loc);
+        return loc;
     }
 
     async updateLocation(id, u) {

@@ -362,7 +362,7 @@ export class UIManager {
     createSettingsPanel() {
         const html = `<div id="wt-settings" class="wt-settings"><div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.10.1-beta</span></b>
+                <b>🐾 PAW MAP <span class="wt-version" style="cursor:default;user-select:none">v0.10.2-beta</span></b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div><div class="inline-drawer-content">
                 <div style="font-size:12px;font-weight:800;margin:2px 0 7px">기본 설정</div>
@@ -842,6 +842,8 @@ export class UIManager {
                     </div>
                     <div id="wt-map-wrap" class="wt-map-wrap">
                         <div id="wt-map-container" class="wt-map-container"></div>
+                        <button id="wt-fantasy-add" type="button" aria-label="지도에 장소 추가" style="display:none">＋ 장소 추가</button>
+                        <div id="wt-fantasy-hint" style="display:none">빈 곳을 꾹 눌러 장소 추가 · 핀을 꾹 눌러 이동</div>
                     </div>
                     <div id="wt-leaflet-wrap" class="wt-map-wrap" style="display:none">
                         <div id="wt-leaflet-container" class="wt-map-container wt-leaflet-map"></div>
@@ -1120,11 +1122,22 @@ export class UIManager {
         $('#wt-mode-node').on('click', () => this._setMapMode('node'));
         $('#wt-mode-leaflet').on('click', () => this._setMapMode('leaflet'));
         $('#wt-mode-fantasy').on('click', () => this._setMapMode('fantasy'));
+        $('#wt-fantasy-add').on('click', () => {
+            const vb = this.mapRenderer?.vb;
+            if (vb) this._createFantasyLocation(vb.x + vb.w / 2, vb.y + vb.h / 2);
+        });
         // 검색 탭 전환 (Bug K: 장소/주소 분리)
         this._searchMode = 'loc';
         // 🔄 약도 재배치 (전체 핀 리셋 + 배경 캐시 무효화)
         $('#wt-btn-refresh').on('click', () => {
             if (this.mapRenderer) {
+                if (extension_settings[EXTENSION_NAME]?.fantasyTheme === true) {
+                    // Reframe only. Never erase the user's hand-placed coordinates.
+                    this.mapRenderer._vbManual = false;
+                    this.mapRenderer.render();
+                    toastSuccess('지도를 등록 장소 중심으로 맞췄어요.');
+                    return;
+                }
                 // 모든 핀 위치 및 세션 캐시 리셋
                 for (const loc of this.lm.locations) {
                     loc._manualXY = false;
@@ -1528,7 +1541,7 @@ ${trimmed.substring(0, 1500)}`;
             // 판타지 테마 상태 복원
             const s = extension_settings[EXTENSION_NAME];
             if (s?.fantasyTheme) {
-                // 판타지에서도 일반 모드의 UI 색상과 구조를 그대로 사용한다.
+                // 공용 구조는 유지하고 바텀시트에만 별도 양피지 색상을 적용한다.
                 $('#wt-panel').removeClass('wt-panel-fantasy');
                 $('#wt-fantasy-btn').css({ background: '#DAA520', borderRadius: '6px' });
                 $('.wt-panel-title span:first').text('🐶');
@@ -1556,7 +1569,7 @@ ${trimmed.substring(0, 1500)}`;
                 if (this.leafletRenderer?.map) this.leafletRenderer.invalidateSize();
             }, 600);
         }
-        else { $('#wt-panel').removeClass('wt-panel-open'); $('#wt-float-close').hide(); this.hidePop(); }
+        else { this.mapRenderer?.cancelFantasyGesture?.(); $('#wt-panel').removeClass('wt-panel-open'); $('#wt-float-close').hide(); this.hidePop(); }
     }
 
     // ========== 🏰 판타지 모드 토글 ==========
@@ -1584,7 +1597,7 @@ ${trimmed.substring(0, 1500)}`;
         }
 
         if (isFantasy) {
-            // 지도만 판타지로 바꾸고 패널 UI는 일반 모드와 동일하게 유지한다.
+            // 공용 패널 구조와 판타지 전용 바텀시트 색상을 함께 사용한다.
             $('#wt-panel').removeClass('wt-panel-fantasy');
             $('#wt-fantasy-btn').css({ background: '#DAA520', borderRadius: '6px' });
             if (s.mapMode !== 'fantasy') s._prevMapMode = s.mapMode || 'leaflet';
@@ -1613,6 +1626,7 @@ ${trimmed.substring(0, 1500)}`;
 
     // 채팅 전환 시 지도 완전 리셋
     resetMap() {
+        this.mapRenderer?.cancelFantasyGesture?.();
         const nodeContainer = document.querySelector('#wt-map-container');
         if (nodeContainer) nodeContainer.innerHTML = '';
         this.mapRenderer = null;
@@ -1661,6 +1675,7 @@ ${trimmed.substring(0, 1500)}`;
             if (this.mapRenderer) {
                 this.mapRenderer.fantasyMode = (mode === 'fantasy');
                 if (mode === 'fantasy') {
+                    this.mapRenderer.onLongPress = (x, y) => this._createFantasyLocation(x, y);
                     this.mapRenderer.onLocationClick = id => this._openFantasyLocation(id);
                     this.mapRenderer.onPopupCardClick = id => this._openFantasyLocation(id);
                 } else {
@@ -1697,6 +1712,10 @@ ${trimmed.substring(0, 1500)}`;
     // ========== 맵 모드 전환 ==========
     async _setMapMode(mode) {
         const s = extension_settings[EXTENSION_NAME];
+        this.mapRenderer?.cancelFantasyGesture?.();
+        if (this.mapRenderer) this.mapRenderer._movingNodeId = null;
+        $('#wt-panel').toggleClass('wt-parchment-ui', mode === 'fantasy');
+        $('#wt-fantasy-add,#wt-fantasy-hint').toggle(mode === 'fantasy');
         s.mapMode = mode; saveSettingsDebounced();
 
         // UI 버튼 활성화
@@ -1852,7 +1871,8 @@ ${trimmed.substring(0, 1500)}`;
             $('#wt-map-section').show();
             $('#wt-map-toggle').hide();
             $('#wt-btn-refresh').show();
-            $('#wt-btn-refresh').attr('title', '가상 지도 재생성');
+            $('#wt-btn-refresh').attr('title', '등록 장소 중심으로 보기');
+            $('#wt-search-input').attr('placeholder', '등록 장소 검색...');
             $('#wt-paw-nav').show();
             const container = document.querySelector('#wt-map-container');
             if (container) {
@@ -1871,6 +1891,7 @@ ${trimmed.substring(0, 1500)}`;
             }
             if (this.mapRenderer) {
                 this.mapRenderer.fantasyMode = true;
+                this.mapRenderer.onLongPress = (x, y) => this._createFantasyLocation(x, y);
                 this.mapRenderer.onLocationClick = id => this._openFantasyLocation(id);
                 this.mapRenderer.onPopupCardClick = id => this._openFantasyLocation(id);
                 this.mapRenderer._layoutDirty = true;
@@ -1906,6 +1927,41 @@ ${trimmed.substring(0, 1500)}`;
         this._lastFantasyOpenId = locId;
         window._wtMapPinOpenAt = Date.now();
         this._showBottomSheet(locId);
+    }
+
+    async _createFantasyLocation(x, y) {
+        if (this._fantasyCreatePending || extension_settings[EXTENSION_NAME]?.fantasyTheme !== true) return;
+        const chatId = this.lm.currentChatId;
+        const guard = makeChatGuard();
+        if (!chatId) { toastWarn('채팅을 연 뒤 장소를 추가해주세요.'); return; }
+        this._fantasyCreatePending = true;
+        try {
+            const entered = prompt('이 자리에 만들 장소 이름:');
+            const name = this._plainText(entered || '', 160);
+            if (!name) return;
+            if (!guard() || chatId !== this.lm.currentChatId) return;
+            if (/→|->|➡|⟶|=>/.test(name)) { toastWarn('이동 경로 대신 장소 이름 하나를 입력해주세요.'); return; }
+            const existing = this.lm.findByNameExact(name);
+            if (existing) {
+                this._showBottomSheet(existing.id);
+                toastWarn('같은 이름의 장소가 있어 기존 장소를 열었어요. 위치는 바꾸지 않았습니다.');
+                return;
+            }
+            const loc = await this.lm.addLocation(name, '', [], {
+                source: 'manual', fictional: true, mapPosition: { x, y },
+            });
+            if (!loc || !guard() || chatId !== this.lm.currentChatId) return;
+            this.mapRenderer?._savePinPos(loc.id, loc.x, loc.y);
+            if (this.mapRenderer) this.mapRenderer._vbManual = true;
+            this.mapRenderer?.render();
+            this._openFantasyLocation(loc.id);
+            this._applyBsStage(2);
+            toastSuccess('장소를 추가했어요.');
+        } catch (_) {
+            toastWarn('장소를 저장하지 못했습니다. 다시 시도해주세요.');
+        } finally {
+            this._fantasyCreatePending = false;
+        }
     }
 
     async _yakdoRecenter(locId) {
@@ -2821,6 +2877,8 @@ ${trimmed.substring(0, 1500)}`;
 
         bs.html(html).show().css({ background: '#fff' });
         this._prepareCommunityPhotos(bs[0]);
+        bs.attr('data-active-tab', 'overview');
+        bs.find('.wt-bs-tab[data-tab="overview"]').addClass('wt-bs-tab-selected');
         this._applyBsStage(1); // peek
         this._bindBsDrag(bs[0]); // ★ 터치 드래그 바인딩!
         bs.find('.wt-bs-handle').css({ position: 'sticky', top: 0, zIndex: 10, background: '#fff' });
@@ -2859,6 +2917,8 @@ ${trimmed.substring(0, 1500)}`;
             bs.find(`#wt-bs-tab-${tab}`).show();
             // v0.9.0: 활성 탭 DOM 속성에 저장 (삭제 후 재렌더 시 복원용)
             bs.attr('data-active-tab', tab);
+            bs.find('.wt-bs-tab').removeClass('wt-bs-tab-selected');
+            $(this).addClass('wt-bs-tab-selected');
             // 이벤트/리뷰/커뮤니티 탭은 full로 확장
             if (tab !== 'overview' && self._bsStage < 3) self._applyBsStage(3);
         });
@@ -3181,32 +3241,19 @@ ${trimmed.substring(0, 1500)}`;
         });
         bs.find('#wt-bs-rv-more').on('click', (e) => {
             e.stopPropagation();
-            // 리뷰 탭으로 전환
-            bs.find('.wt-bs-tab').css({ color: '#B0A898', borderBottomColor: 'transparent' });
-            bs.find('.wt-bs-tab[data-tab="review"]').css({ color: '#5E84E2', borderBottomColor: '#5E84E2' });
-            bs.find('[id^="wt-bs-tab-"]').hide();
-            bs.find('#wt-bs-tab-review').show();
-            if (self._bsStage < 3) self._applyBsStage(3);
+            bs.find('.wt-bs-tab[data-tab="review"]').trigger('click');
         });
         // ★ 터줏대감 탭 전환
         bs.find('.wt-bs-npc-more').on('click', (e) => {
             e.stopPropagation();
-            bs.find('.wt-bs-tab').css({ color: '#B0A898', borderBottomColor: 'transparent' });
-            bs.find('.wt-bs-tab[data-tab="review"]').css({ color: '#1A73E8', borderBottomColor: '#1A73E8' });
-            bs.find('[id^="wt-bs-tab-"]').hide();
-            bs.find('#wt-bs-tab-review').show();
-            if (self._bsStage < 3) self._applyBsStage(3);
+            bs.find('.wt-bs-tab[data-tab="review"]').trigger('click');
             // NPC 섹션으로 스크롤 (block:'nearest' — 맨 위로 강제 스크롤해서 빈 공간 고정되던 버그 방지)
             setTimeout(() => bs.find('#wt-bs-npc-section')[0]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 100);
         });
         // T4: 기억 링크 클릭 → 이벤트 탭으로 전환
         bs.find('.wt-bs-mem-link').on('click', function(e) {
             e.stopPropagation();
-            bs.find('.wt-bs-tab').css({ color: '#B0A898', borderBottomColor: 'transparent' });
-            bs.find('.wt-bs-tab[data-tab="events"]').css({ color: '#2B8A6E', borderBottomColor: '#2B8A6E' });
-            bs.find('[id^="wt-bs-tab-"]').hide();
-            bs.find('#wt-bs-tab-events').show();
-            if (self._bsStage < 3) self._applyBsStage(3);
+            bs.find('.wt-bs-tab[data-tab="events"]').trigger('click');
         });
         // ★ 내부 장소 클릭 → 서브 상세 뷰
         bs.find('.wt-bs-sub-item').on('click', function(e) {
@@ -4021,6 +4068,11 @@ ${trimmed.substring(0, 1500)}`;
 
     // ========== 장소 추가 팝업 (#7 미래 장소 등록) ==========
     _showAddLocationPopup() {
+        if (extension_settings[EXTENSION_NAME]?.fantasyTheme === true) {
+            const vb = this.mapRenderer?.vb;
+            if (vb) this._createFantasyLocation(vb.x + vb.w / 2, vb.y + vb.h / 2);
+            return;
+        }
         $('#wt-addloc-popup').remove();
         const popup = $(`<div id="wt-addloc-popup" style="position:absolute;top:60px;left:14px;right:14px;background:#fff;border:2px solid #F6A93A;border-radius:14px;padding:14px;z-index:9999;box-shadow:0 6px 24px rgba(0,0,0,.15);font-family:-apple-system,'Noto Sans KR',sans-serif">
             <div style="font-size:14px;font-weight:700;color:#775537;margin-bottom:8px">📍 새 장소 등록</div>
